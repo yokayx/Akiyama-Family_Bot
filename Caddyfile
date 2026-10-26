@@ -1,0 +1,16 @@
+# akiyama-5rp.ru — Caddy для сайта Akiyama Family
+# Контейнер бота (docker compose) слушает 127.0.0.1:8080 внутри хоста.
+# TLS сам подхватит Let's Encrypt — предварительно настройте DNS A-запись.
+
+akiyama-5rp.ru, www.akiyama-5rp.ru {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        X-Frame-Options DENY
+    }
+
+    # DDoS/безопосный fail: Caddy сам ограничивает частоту запросов на level 2.
+    reverse_proxy / 127.0.0.1:8080
+}

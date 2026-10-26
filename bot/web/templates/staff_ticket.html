@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h1>Заявка #{{ ticket.id }}</h1>
+  <p class="muted">
+    Вид: {{ kind_label }} · статус: {{ ticket.status }} ·
+    заявитель: {{ applicant_label }} ·
+    взят: {{ handler_label }}
+  </p>
+  <p class="muted">Канал: {{ ticket.channel_id }} · создана: {{ ticket.created_at }}</p>
+
+  {% if answers %}
+  <table class="table answers">
+    <tbody>
+      {% for answer in answers %}
+      <tr>
+        <th>{{ answer.question or 'Вопрос' }}</th>
+        <td>{{ answer.answer or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Ответы пусты.</p>
+  {% endif %}
+
+  <div class="actions">
+    {% if ticket.status == 'open' %}
+    <form method="post" action="/staff/applications/{{ ticket.id }}/claim" class="inline">
+      <button class="btn" type="submit">Взять заявку</button>
+    </form>
+    {% endif %}
+    {% if ticket.status == 'claimed' %}
+    <form method="post" action="/staff/applications/{{ ticket.id }}/release" class="inline">
+      <button class="btn btn-ghost" type="submit">Освободить</button>
+    </form>
+    <form method="post" action="/staff/applications/{{ ticket.id }}/accept" class="inline">
+      <button class="btn btn-success" type="submit">Принять</button>
+    </form>
+    <form method="post" action="/staff/applications/{{ ticket.id }}/reject" class="inline"
+          onsubmit="var r = document.getElementById('reason').value.trim();
+                    if (!r) { document.getElementById('reason').focus(); return false; }">
+      <input type="text" id="reason" name="reason" placeholder="Причина отказа" style="width:240px">
+      <button class="btn btn-danger" type="submit">Отклонить</button>
+    </form>
+    {% endif %}
+  </div>
+
+  <p class="muted"><a href="/staff/applications">← Назад к заявкам</a></p>
+</section>
+{% endblock %}

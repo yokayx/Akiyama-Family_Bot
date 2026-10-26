@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h1>Сборы · Akiyama</h1>
+  {% if events %}
+  <ul class="event-list">
+    {% for event in events %}
+    <li class="event">
+      <div class="event-time">{{ event.event_time }}</div>
+      <div class="event-body">
+        <div class="event-title">{{ event.title or 'Сбор' }}</div>
+        <div class="event-reason">{{ event.reason }}</div>
+        <div class="event-meta">{{ event.event_kind }} · требуется статик: {{ 'да' if event.need_static else 'нет' }}</div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">Нет активных сборов.</p>
+  {% endif %}
+</section>
+{% endblock %}

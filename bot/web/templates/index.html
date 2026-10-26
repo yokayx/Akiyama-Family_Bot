@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <h1>Akiyama Family</h1>
+  <p class="sub">GTA5RP · VZP · состав и статистика семьи</p>
+</section>
+
+<section class="cards">
+  <div class="card">
+    <div class="card-title">Онлайн</div>
+    <div class="card-value">
+      {% if online_count is not none %}{{ online_count }}{% else %}—{% endif %}
+    </div>
+    <div class="card-sub">сервер {{ online_server_name }}</div>
+  </div>
+  <div class="card">
+    <div class="card-title">В составе</div>
+    <div class="card-value">{{ roster_count }}</div>
+    <div class="card-sub"><a href="/roster">подробнее →</a></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Сборы</div>
+    <div class="card-sub"><a href="/gatherings">активные сборы →</a></div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Статистика по войнам</h2>
+  {% if stats.total %}
+  <div class="stats-grid">
+    <div><span>{{ stats.total }}</span><label>войн</label></div>
+    <div><span class="win">{{ stats.wins }}</span><label>победы</label></div>
+    <div><span class="loss">{{ stats.losses }}</span><label>поражения</label></div>
+    <div><span>{{ stats.unknown }}</span><label>без результата</label></div>
+    <div><span>{{ stats.winrate }}%</span><label>выиграно</label></div>
+    <div><span>{{ stats.caps_atk }}</span><label>взято атак.</label></div>
+    <div><span>{{ stats.caps_def }}</span><label>взято защит.</label></div>
+  </div>
+  <p><a href="/vzp">Все войны и топ игроков →</a></p>
+  {% else %}
+  <p class="muted">Статистика появится после первой доигранной войны.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Последние войны</h2>
+  {% if wars %}
+  <ul class="war-list">
+    {% for war in wars %}
+    <li>
+      <span class="war-id">{{ war.war_id }}</span>
+      <span class="war-place">{{ war.territory or 'территория' }}</span>
+      {% if war.won is true %}<span class="badge win">победа</span>
+      {% elif war.won is false %}<span class="badge loss">поражение</span>
+      {% else %}<span class="badge">—</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">Пока нет записанных войн.</p>
+  {% endif %}
+</section>
+{% endblock %}

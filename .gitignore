@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env
+data/*.db
+data/*.db-journal
+*.egg-info/
+dist/
+build/
+
+# Кэш вложений для логов
+data/log_attachments/

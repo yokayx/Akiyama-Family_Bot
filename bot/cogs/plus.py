@@ -1,0 +1,473 @@
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime
+from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+from sqlalchemy import select
+
+from bot.config import (
+    HEAD_VZP_ROLE_ID,
+    MOSCOW_TZ,
+    PLUS_KIND_GENERAL,
+    PLUS_KIND_LABELS,
+    PLUS_KIND_PINGS,
+    PLUS_KIND_VZP,
+    PLUS_VZP_ROLE_IDS,
+    RANK_ROLE_IDS,
+)
+from bot.db import session_scope
+from bot.models import PlusEvent
+from bot.plus.timeparse import parse_event_time
+from bot.roster.manager import is_leader
+
+if TYPE_CHECKING:
+    from bot.main import AkiyamaBot
+
+log = logging.getLogger("akiyama.plus")
+_MSK = ZoneInfo(MOSCOW_TZ)
+_MSK = ZoneInfo(MOSCOW_TZ)
+
+
+def _is_family(member: discord.Member) -> bool:
+    return any(role.id in RANK_ROLE_IDS for role in member.roles) or is_leader(member)
+
+
+def _can_create_plus(member: discord.Member) -> bool:
+    return any(role.id == HEAD_VZP_ROLE_ID for role in member.roles) or is_leader(member)
+
+
+def _kind_of(event: PlusEvent) -> str:
+    return getattr(event, "event_kind", None) or PLUS_KIND_GENERAL
+
+
+def _has_any_role(member: discord.Member, role_ids: tuple[int, ...]) -> bool:
+    return any(role.id in role_ids for role in member.roles)
+
+
+FAMILY_JOIN_DENY = "Записываться могут только члены семьи."
+VZP_JOIN_DENY = "На сбор VZP могут записываться только состав семьи и роли VZP."
+
+
+def join_denial(member: discord.Member, kind: str | None) -> str | None:
+    """Почему человеку нельзя записаться. `None` — можно."""
+    if _is_family(member):
+        return None
+    if kind == PLUS_KIND_VZP and _has_any_role(member, PLUS_VZP_ROLE_IDS):
+        return None
+    return VZP_JOIN_DENY if kind == PLUS_KIND_VZP else FAMILY_JOIN_DENY
+
+
+def _kind_label(kind: str | None) -> str:
+    return PLUS_KIND_LABELS.get(kind or PLUS_KIND_GENERAL, "Общий")
+
+
+def _load_participants(raw: str | None) -> dict:
+    try:
+        data = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+# Поле эмбеда — 1024 символа, держим запас.
+FIELD_LIMIT = 1000
+
+
+def _chunk_lines(lines: list[str], limit: int = FIELD_LIMIT) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for line in lines:
+        extra = len(line) + (1 if current else 0)
+        if current and size + extra > limit:
+            chunks.append(current)
+            current = [line]
+            size = len(line)
+        else:
+            current.append(line)
+            size += extra
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _safe_int(value: object) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_event_time(when: datetime | None) -> str:
+    """Время сбора ровно как его указали: `20:00 МСК`, без сдвига по зоны клиента.
+
+    `<t:...:t>` Discord пересчитывает в локальное время читающего, из-за чего
+    сбор, созданный на 20:00 МСК, у кого-то показывался как 22:00. Держим
+    московское время текстом, относительное «через N» оставляем.
+    """
+    if when is None:
+        return "-"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=_MSK)
+    local = when.astimezone(_MSK)
+    today = datetime.now(_MSK).date()
+    if local.date() == today:
+        mark = ""
+    elif (local.date() - today).days == 1:
+        mark = " · завтра"
+    else:
+        mark = f" · {local:%d.%m}"
+    return f"{local:%H:%M} МСК{mark} · <t:{int(when.timestamp())}:R>"
+
+
+def _static_of(payload: object) -> str:
+    if isinstance(payload, dict):
+        return str(payload.get("static") or "").strip() or "—"
+    return "—"
+
+
+async def _say(interaction: discord.Interaction, text: str) -> None:
+    await interaction.response.send_message(text, ephemeral=True)
+
+
+STATIC_HINT = "Только цифры — это статический ID персонажа"
+
+
+class StaticModal(discord.ui.Modal):
+    def __init__(self, cog: PlusCog, event_id: int) -> None:
+        super().__init__(title="Указать статик")
+        self.cog = cog
+        self.event_id = event_id
+        self.static = discord.ui.TextInput(
+            label="Статик",
+            placeholder=STATIC_HINT,
+            min_length=1,
+            max_length=20,
+        )
+        self.add_item(self.static)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = str(self.static).strip()
+        if not raw.isdigit():
+            await interaction.response.send_message(
+                f"Статик — это статический ID персонажа, только цифры. "
+                f"Вы ввели: `{raw or 'пусто'}`",
+                ephemeral=True,
+            )
+            return
+        await self.cog.add_participant(interaction, self.event_id, raw)
+
+
+class PlusEventView(discord.ui.View):
+    def __init__(self, cog: PlusCog) -> None:
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    async def _event(self, interaction: discord.Interaction) -> PlusEvent | None:
+        mid = interaction.message.id if interaction.message else 0
+        event = await self.cog.get_event_from_message(mid)
+        if event is None or not event.is_active:
+            await _say(interaction, "Сбор не найден или уже закрыт.")
+            return None
+        return event
+
+    @discord.ui.button(label="➕ Плюс", style=discord.ButtonStyle.success, custom_id="plus:join")
+    async def plus_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        event = await self._event(interaction)
+        if event is None:
+            return
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if member is not None:
+            denial = join_denial(member, _kind_of(event))
+            if denial is not None:
+                await _say(interaction, denial)
+                return
+        if event.need_static:
+            await interaction.response.send_modal(StaticModal(self.cog, event.id))
+            return
+        await self.cog.add_participant(interaction, event.id, None)
+
+    @discord.ui.button(label="➖ Минус", style=discord.ButtonStyle.danger, custom_id="plus:leave")
+    async def minus_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        event = await self._event(interaction)
+        if event is None:
+            return
+        await self.cog.remove_participant(interaction, event.id)
+
+
+class PlusCog(commands.Cog, name="Plus"):
+    """Сборы: /плюсы, кнопки плюс/минус, опциональный статик."""
+
+    def __init__(self, bot: AkiyamaBot) -> None:
+        self.bot = bot
+
+    async def cog_load(self) -> None:
+        self.bot.add_view(PlusEventView(self))
+
+    async def get_event(self, event_id: int) -> PlusEvent | None:
+        async with session_scope() as session:
+            result = await session.execute(select(PlusEvent).where(PlusEvent.id == event_id))
+            return result.scalar_one_or_none()
+
+    async def list_events(*, status: str = "active", limit: int = 50) -> list[PlusEvent]:
+        """События для сайта/панели. status: active/closed/all."""
+        async with session_scope() as session:
+            query = select(PlusEvent).order_by(PlusEvent.event_time.desc()).limit(limit)
+            if status == "active":
+                query = select(PlusEvent).where(PlusEvent.is_active.is_(True)).order_by(
+                    PlusEvent.event_time.desc()
+                ).limit(limit)
+            elif status == "closed":
+                query = select(PlusEvent).where(PlusEvent.is_active.is_(False)).order_by(
+                    PlusEvent.event_time.desc()
+                ).limit(limit)
+            return list((await session.scalars(query)).all())
+
+    async def get_event_from_message(self, message_id: int) -> PlusEvent | None:
+        async with session_scope() as session:
+            stmt = select(PlusEvent).where(PlusEvent.message_id == message_id)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    def build_embed(self, guild: discord.Guild, event: PlusEvent) -> discord.Embed:
+        when = event.event_time
+        kind = getattr(event, "event_kind", None) or PLUS_KIND_GENERAL
+        label = _kind_label(kind)
+        color = (
+            discord.Color.from_rgb(192, 57, 43)
+            if kind == PLUS_KIND_VZP
+            else discord.Color.from_rgb(88, 101, 242)
+        )
+        embed = discord.Embed(
+            title=getattr(event, "title", None) or f"Сбор · {label}",
+            description=(
+                f"**Тип:** {label}\n"
+                f"**Причина:** {event.reason}\n"
+                f"**Время:** {_format_event_time(when)}\n"
+                f"**Нужен статик:** {'Да' if event.need_static else 'Нет'}"
+            ),
+            color=color,
+        )
+        participants = _load_participants(event.participants_json)
+        if not participants:
+            embed.add_field(name="Участники", value="Пока никто не записался.", inline=False)
+            return embed
+        entries: list[tuple[int, discord.Member, object]] = []
+        for user_id, payload in participants.items():
+            member_id = _safe_int(user_id)
+            if member_id is None:
+                continue
+            member = guild.get_member(member_id)
+            if member is None:
+                continue
+            entries.append((member_id, member, payload))
+
+        # Форма ники не используется: в строке — только тег.
+        # Статик (если сбор его требует) — отдельный столбец после тега.
+        lines: list[str] = []
+        for index, (member_id, _member, payload) in enumerate(entries, start=1):
+            base = f"{index}. <@{member_id}>"
+            if event.need_static:
+                static = _static_of(payload)
+                if static != "—":
+                    base = f"{base} | {static}"
+            lines.append(base)
+        if not lines:
+            embed.add_field(name="Участники", value="Пока никто не записался.", inline=False)
+            return embed
+
+        chunks = _chunk_lines(lines)
+        for index, chunk in enumerate(chunks, start=1):
+            title = f"Участники ({len(lines)})"
+            if len(chunks) > 1:
+                title = f"{title} · {index}/{len(chunks)}"
+            embed.add_field(name=title, value="\n".join(chunk), inline=False)
+        return embed
+
+    async def update_event_message(self, event_id: int) -> None:
+        event = await self.get_event(event_id)
+        if event is None or event.message_id is None:
+            return
+        channel = self.bot.get_channel(event.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            try:
+                fetched = await self.bot.fetch_channel(event.channel_id)
+            except discord.HTTPException:
+                log.exception("plus channel %s missing", event.channel_id)
+                return
+            if not isinstance(fetched, discord.TextChannel):
+                return
+            channel = fetched
+        try:
+            message = await channel.fetch_message(event.message_id)
+        except discord.HTTPException:
+            log.exception("cannot fetch plus message %s", event.message_id)
+            return
+        embed = self.build_embed(channel.guild, event)
+        await message.edit(embed=embed, view=PlusEventView(self))
+
+    async def add_participant(
+        self,
+        interaction: discord.Interaction,
+        event_id: int,
+        static_name: str | None,
+    ) -> None:
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if interaction.guild is None or member is None:
+            await _say(interaction, "Только на сервере.")
+            return
+        denial = join_denial(member, PLUS_KIND_GENERAL)
+        if denial is not None:
+            await _say(interaction, denial)
+            return
+
+        async with session_scope() as session:
+            result = await session.execute(select(PlusEvent).where(PlusEvent.id == event_id))
+            event = result.scalar_one_or_none()
+            if event is None or not event.is_active:
+                await _say(interaction, "Сбор не найден или закрыт.")
+                return
+            denial = join_denial(member, _kind_of(event))
+            if denial is not None:
+                await _say(interaction, denial)
+                return
+            people = _load_participants(event.participants_json)
+            people[str(member.id)] = {"user_id": member.id, "static": static_name or ""}
+            event.participants_json = json.dumps(people, ensure_ascii=False)
+
+        await self.update_event_message(event_id)
+        text = "Вы записаны на событие."
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True)
+
+    async def remove_participant(self, interaction: discord.Interaction, event_id: int) -> None:
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if member is None:
+            await _say(interaction, "Не удалось определить участника.")
+            return
+
+        async with session_scope() as session:
+            result = await session.execute(select(PlusEvent).where(PlusEvent.id == event_id))
+            event = result.scalar_one_or_none()
+            if event is None or not event.is_active:
+                await _say(interaction, "Сбор не найден или закрыт.")
+                return
+            people = _load_participants(event.participants_json)
+            people.pop(str(member.id), None)
+            event.participants_json = json.dumps(people, ensure_ascii=False)
+
+        await self.update_event_message(event_id)
+        await interaction.response.send_message("Вы убраны из списка участников.", ephemeral=True)
+
+    async def create_event(
+        self,
+        channel: discord.TextChannel,
+        *,
+        creator_id: int,
+        title: str | None,
+        reason: str,
+        event_time: datetime,
+        need_static: bool,
+        kind: str,
+        ping_role: int | None = None,
+    ) -> PlusEvent | None:
+        """Создать сбор, отправить эмбед с кнопками и запомнить message_id."""
+        async with session_scope() as session:
+            event = PlusEvent(
+                channel_id=channel.id,
+                creator_id=creator_id,
+                title=title,
+                reason=reason,
+                event_time=event_time,
+                need_static=need_static,
+                participants_json="{}",
+                is_active=True,
+                event_kind=kind,
+            )
+            session.add(event)
+            await session.flush()
+            event_id = event.id
+
+        stored = await self.get_event(event_id)
+        if stored is None:
+            return None
+        embed = self.build_embed(channel.guild, stored)
+        ping = f"<@&{ping_role}>" if ping_role else None
+        mentions = discord.AllowedMentions(everyone=False, users=False, roles=True)
+        message = await channel.send(
+            content=ping, embed=embed, view=PlusEventView(self), allowed_mentions=mentions
+        )
+
+        async with session_scope() as session:
+            result = await session.execute(select(PlusEvent).where(PlusEvent.id == event_id))
+            db_event = result.scalar_one()
+            db_event.message_id = message.id
+        return stored
+
+    @app_commands.command(name="плюсы", description="Создать сбор на мероприятие")
+    @app_commands.describe(
+        тип="Общий или VZP — от этого зависит тег роли",
+        причина="Зачем сбор",
+        время="ЧЧ:ММ по Москве",
+        нужен_статик="Спрашивать статик при записи (необязательно)",
+    )
+    @app_commands.choices(
+        тип=[
+            app_commands.Choice(name="Общий", value=PLUS_KIND_GENERAL),
+            app_commands.Choice(name="VZP", value=PLUS_KIND_VZP),
+        ]
+    )
+    async def plus_command(
+        self,
+        interaction: discord.Interaction,
+        тип: app_commands.Choice[str],
+        причина: str,
+        время: str,
+        нужен_статик: bool = False,
+    ) -> None:
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if interaction.guild is None or member is None:
+            await _say(interaction, "Только на сервере.")
+            return
+        if not _can_create_plus(member):
+            await _say(interaction, "Сборы создаёт Head VZP или руководство.")
+            return
+        try:
+            event_time = parse_event_time(время)
+        except ValueError as error:
+            await _say(interaction, str(error))
+            return
+        if interaction.channel_id is None:
+            await _say(interaction, "Нет канала.")
+            return
+        channel = interaction.guild.get_channel(interaction.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            await _say(interaction, "Канал недоступен.")
+            return
+
+        stored = await self.create_event(
+            channel,
+            creator_id=member.id,
+            title=None,
+            reason=причина,
+            event_time=event_time,
+            need_static=нужен_статик,
+            kind=тип.value,
+            ping_role=PLUS_KIND_PINGS.get(тип.value),
+        )
+        if stored is None:
+            await _say(interaction, "Не удалось создать сбор.")
+            return
+        await _say(interaction, "Сбор создан.")
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(PlusCog(bot))  # type: ignore[arg-type]
