@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 import uvicorn
 from discord.ext import commands
@@ -44,7 +45,8 @@ class WebCog(commands.Cog, name="Web"):
             online=self.online,
             secret=settings.web_secret or "insecure-dev-secret",
         )
-        app = create_app(self.ctx)
+        static_dir = Path(settings.web_static_dir)
+        app = create_app(self.ctx, static_dir=static_dir if static_dir.is_dir() else None)
         config = uvicorn.Config(
             app,
             host=settings.web_host,

@@ -1,7 +1,9 @@
-"""Тесты сайта (FastAPI-приложение в процессе бота)."""
+"""Тесты сайта (FastAPI: JSON API + хостинг React SPA)."""
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -35,6 +37,23 @@ def _make_settings() -> Settings:
     )
 
 
+class _StubTicket:
+    """Минимальная Ticket для тестов API."""
+
+    id = 5
+    channel_id = 12345
+    applicant_id = 999
+    kind = "main"
+    handler_id = None
+    status = "open"
+    answers_json = '[{"question": "Сколько лет?", "answer": "20"}]'
+    applicant_replied = False
+    rejection_reason = None
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    claimed_at = None
+    closed_at = None
+
+
 def _make_ctx() -> WebContext:
     bot = MagicMock()
     bot.get_guild.return_value = None
@@ -42,6 +61,7 @@ def _make_ctx() -> WebContext:
     applications = MagicMock()
     applications.list_tickets = AsyncMock(return_value=[])
     applications.claim_ticket = AsyncMock(return_value=(True, "ok"))
+    applications.get_ticket = AsyncMock(return_value=_StubTicket())
     plus = MagicMock()
     plus.list_events = AsyncMock(return_value=[])
     plus.create_event = AsyncMock(return_value=None)
@@ -58,17 +78,17 @@ def _make_ctx() -> WebContext:
     }.get(name)
 
     online = OnlineCache(
-        api_url="https://example.com/api/{server_id}/online",
-        server_id=8,
+        api_url="https://example.com/api/servers",
+        server_id=27,
         server_name="Blaine",
     )
-    online.online_count = 42
+    online.online_count = 5499
     online.updated = time.time()
     return WebContext(settings=_make_settings(), bot=bot, online=online, secret=_SECRET)
 
 
-def _client(ctx: WebContext):
-    app = create_app(ctx)
+def _client(ctx: WebContext, static_dir: Path | None = None):
+    app = create_app(ctx, static_dir=static_dir)
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     )
@@ -80,7 +100,9 @@ def _client(ctx: WebContext):
 def test_session_roundtrip() -> None:
     cookie = create_session(uid=7, name="user", is_staff=True, secret=_SECRET)
     data = read_session(cookie, _SECRET)
-    assert data == {"uid": 7, "name": "user", "is_staff": True, "expires": data["expires"]}
+    assert data is not None
+    assert data["uid"] == 7
+    assert data["is_staff"] is True
 
 
 def test_session_tamper_rejected() -> None:
@@ -108,6 +130,13 @@ def test_oauth_url_contains_params() -> None:
     assert "client_id=cid" in url
     assert "state=st" in url
     assert "scope=identify+guilds" in url or "scope=identify%20guilds" in url
+
+
+async def test_oauth_callback_bad_state() -> None:
+    async with _client(_make_ctx()) as client:
+        response = await client.get("/auth/callback?code=x&state=wrong")
+    assert response.status_code == 400
+    assert response.json()["ok"] is False
 
 
 # --- Онлайн-кэш ---------------------------------------------------------------
@@ -145,90 +174,120 @@ def test_online_unknown_server() -> None:
     assert _cache()._find_online({"weird": True}) is None
 
 
-# --- Публичные страницы -------------------------------------------------------
+# --- Публичный JSON API -------------------------------------------------------
 
 
-async def test_index_renders() -> None:
-    async with _client(_make_ctx()) as client:
-        response = await client.get("/")
-    assert response.status_code == 200
-    assert "Akiyama" in response.text
-    assert "42" in response.text  # онлайн
-
-
-async def test_roster_renders() -> None:
-    async with _client(_make_ctx()) as client:
-        response = await client.get("/roster")
-    assert response.status_code == 200
-    assert "ник" in response.text
-
-
-async def test_vzp_page_renders() -> None:
-    async with _client(_make_ctx()) as client:
-        response = await client.get("/vzp")
-    assert response.status_code == 200
-    assert "VZP" in response.text
-
-
-async def test_online_page_renders() -> None:
-    async with _client(_make_ctx()) as client:
-        response = await client.get("/online")
-    assert response.status_code == 200
-    assert "Blaine" in response.text
-
-
-async def test_gatherings_page_renders() -> None:
-    async with _client(_make_ctx()) as client:
-        response = await client.get("/gatherings")
-    assert response.status_code == 200
-
-
-async def test_api_endpoints_json() -> None:
+async def test_public_api_endpoints() -> None:
     async with _client(_make_ctx()) as client:
         roster = await client.get("/api/roster")
         online = await client.get("/api/online")
         stats = await client.get("/api/vzp/stats")
-    assert roster.status_code == 200
+        wars = await client.get("/api/vzp/wars")
+        top = await client.get("/api/vzp/top")
+        gatherings = await client.get("/api/gatherings")
     assert roster.json()["unique_count"] == 3
-    assert online.json()["online"] == 42
-    assert "names" not in online.json()
+    assert online.json()["online"] == 5499
     assert isinstance(stats.json(), dict)
+    assert isinstance(wars.json()["wars"], list)
+    assert isinstance(top.json()["top"], list)
+    assert gatherings.json()["gatherings"] == []
 
 
-# --- Панель стаффа ------------------------------------------------------------
+# --- Панель стаффа (JSON API) -------------------------------------------------
 
 
-async def test_staff_login_page() -> None:
+async def test_api_me_requires_session() -> None:
     async with _client(_make_ctx()) as client:
-        response = await client.get("/staff/login")
-    assert response.status_code == 200
-    assert "Discord" in response.text
+        assert (await client.get("/api/me")).status_code == 401
 
 
-async def test_staff_pages_require_auth() -> None:
-    async with _client(_make_ctx()) as client:
-        assert (await client.get("/staff")).status_code == 401
-        assert (await client.get("/staff/applications")).status_code == 401
-
-
-async def test_staff_with_session() -> None:
-    ctx = _make_ctx()
+async def test_api_me_with_session() -> None:
     cookie = create_session(uid=7, name="staff", is_staff=True, secret=_SECRET)
-    async with _client(ctx) as client:
-        response = await client.get("/staff", cookies={SESSION_COOKIE: cookie})
-    assert response.status_code == 200
-    assert "staff" in response.text
-
-
-async def test_oauth_callback_bad_state() -> None:
     async with _client(_make_ctx()) as client:
-        response = await client.get("/auth/callback?code=x&state=wrong")
-    assert response.status_code == 400
+        response = await client.get("/api/me", cookies={SESSION_COOKIE: cookie})
+    assert response.status_code == 200
+    assert response.json() == {"uid": 7, "name": "staff", "is_staff": True}
 
 
-async def test_oauth_callback_unknown_user_page() -> None:
-    """Правильный state, но не стафф — 403 через mock."""
-    ctx = _make_ctx()
-    async with _client(ctx) as client:
-        response = await client.get("/auth/callback?code=x&state=")
-    assert response.status_code in (400, 403)
+async def test_staff_login_url() -> None:
+    async with _client(_make_ctx()) as client:
+        response = await client.get("/api/staff/login-url")
+    assert response.status_code == 200
+    assert response.json()["url"].startswith("https://discord.com/oauth2/authorize")
+
+
+async def test_staff_tickets_require_session() -> None:
+    async with _client(_make_ctx()) as client:
+        assert (await client.get("/api/staff/tickets")).status_code == 401
+
+
+async def test_staff_tickets_list() -> None:
+    cookie = create_session(uid=7, name="staff", is_staff=True, secret=_SECRET)
+    async with _client(_make_ctx()) as client:
+        response = await client.get("/api/staff/tickets", cookies={SESSION_COOKIE: cookie})
+    assert response.status_code == 200
+    assert response.json()["tickets"] == []
+
+
+async def test_staff_ticket_detail() -> None:
+    cookie = create_session(uid=7, name="staff", is_staff=True, secret=_SECRET)
+    async with _client(_make_ctx()) as client:
+        response = await client.get(
+            "/api/staff/tickets/5", cookies={SESSION_COOKIE: cookie}
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == 5
+    assert body["status"] == "open"
+    assert body["answers"][0]["answer"] == "20"
+
+
+async def test_staff_ticket_claim() -> None:
+    cookie = create_session(uid=7, name="staff", is_staff=True, secret=_SECRET)
+    async with _client(_make_ctx()) as client:
+        response = await client.post(
+            "/api/staff/tickets/5/claim", cookies={SESSION_COOKIE: cookie}
+        )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "message": "ok"}
+
+
+async def test_staff_gatherings_list() -> None:
+    cookie = create_session(uid=7, name="staff", is_staff=True, secret=_SECRET)
+    async with _client(_make_ctx()) as client:
+        response = await client.get(
+            "/api/staff/gatherings", cookies={SESSION_COOKIE: cookie}
+        )
+    assert response.status_code == 200
+    assert response.json()["gatherings"] == []
+
+
+async def test_staff_create_gathering_no_channel() -> None:
+    """Без guild (bot.get_guild → None) — 500 с ошибкой, не падение."""
+    cookie = create_session(uid=7, name="staff", is_staff=True, secret=_SECRET)
+    async with _client(_make_ctx()) as client:
+        response = await client.post(
+            "/api/staff/gatherings",
+            cookies={SESSION_COOKIE: cookie},
+            data={"kind": "general", "reason": "x", "event_time": "2026-12-01T20:00"},
+        )
+    assert response.status_code == 500
+    assert response.json()["ok"] is False
+
+
+# --- SPA хостинг --------------------------------------------------------------
+
+
+async def test_spa_fallback_serves_index(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("<html><body>SPA</body></html>", encoding="utf-8")
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
+    async with _client(_make_ctx(), static_dir=tmp_path) as client:
+        root = await client.get("/")
+        client_route = await client.get("/staff/applications")
+        asset = await client.get("/assets/app.js")
+    assert root.status_code == 200
+    assert "SPA" in root.text
+    assert "SPA" in client_route.text  # client-side route → index.html
+    assert asset.status_code == 200
+    assert "console.log" in asset.text

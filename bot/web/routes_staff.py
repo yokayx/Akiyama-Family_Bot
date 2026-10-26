@@ -1,17 +1,15 @@
-"""Панель стаффа: вход через Discord OAuth, заявки и сборы."""
+"""Панель стаффа: Discord OAuth + JSON API (фронтенд — React SPA)."""
 from __future__ import annotations
 
 import json
 import secrets as py_secrets
-import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from bot.config import (
-    FAMILY_NAME,
     GUILD_ID,
     LEADERSHIP_ROLE_IDS,
     MOSCOW_TZ,
@@ -32,10 +30,6 @@ def _ctx(request: Request):
     return request.app.state.ctx
 
 
-def _templates(request: Request):
-    return request.app.state.templates
-
-
 def _current_user(request: Request) -> dict | None:
     ctx = _ctx(request)
     return read_session(request.cookies.get(SESSION_COOKIE), ctx.secret)
@@ -48,45 +42,11 @@ def _require_staff(request: Request) -> dict:
     return user
 
 
-def _error(request: Request, title: str, message: str, status_code: int):
-    ctx = _ctx(request)
-    return _templates(request).TemplateResponse(
-        request,
-        "error.html",
-        {"title": title, "message": message, "site_url": ctx.settings.site_url},
-        status_code=status_code,
-    )
+def _error_json(status_code: int, message: str) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": message}, status_code=status_code)
 
 
-@staff_router.get("/staff/login", response_class=HTMLResponse)
-async def login(request: Request):
-    ctx = _ctx(request)
-    settings = ctx.settings
-    if not settings.oauth_client_id or not settings.oauth_client_secret:
-        return _templates(request).TemplateResponse(
-            request,
-            "error.html",
-            {
-                "title": "OAuth не настроен",
-                "message": "oauth_client_id/oauth_client_secret пусты — заполните .env",
-                "site_url": settings.site_url,
-            },
-            status_code=500,
-        )
-    if _current_user(request):
-        return RedirectResponse("/staff", status_code=302)
-    state = py_secrets.token_urlsafe(24)
-    request.app.state.oauth_state = state
-    url = build_authorize_url(
-        client_id=settings.oauth_client_id,
-        redirect_uri=settings.oauth_redirect_uri,
-        state=state,
-    )
-    return _templates(request).TemplateResponse(
-        request,
-        "login.html",
-        {"title": "Вход стаффа", "authorize_url": url, "family": FAMILY_NAME},
-    )
+# --- OAuth --------------------------------------------------------------------
 
 
 @staff_router.get("/auth/callback")
@@ -94,9 +54,9 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
     ctx = _ctx(request)
     settings = ctx.settings
     if state != getattr(request.app.state, "oauth_state", None):
-        return _error(request, "Неверный state", "Запрос неизвестен — вернитесь к входу.", 400)
+        return _error_json(400, "Запрос неизвестен — вернитесь к входу.")
     if not code:
-        return _error(request, "Нет кода", "OAuth вернул пустой code.", 400)
+        return _error_json(400, "OAuth вернул пустой code.")
     token = await exchange_code(
         client_id=settings.oauth_client_id,
         client_secret=settings.oauth_client_secret,
@@ -106,11 +66,10 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
     user = await fetch_oauth_user(token["access_token"])
     member = await fetch_guild_member(token["access_token"], GUILD_ID)
     if member is None:
-        return _error(request, "Не на сервере", "Аккаунт не найден на сервере family.", 403)
+        return _error_json(403, "Аккаунт не найден на сервере family.")
     role_ids = {role["id"] for role in member.get("roles", [])}
-    is_staff = bool(role_ids & _STAFF_ROLE_IDS)
-    if not is_staff:
-        return _error(request, "Не staff", "Нет staff-роли на сервере.", 403)
+    if not role_ids & _STAFF_ROLE_IDS:
+        return _error_json(403, "Нет staff-роли на сервере.")
     cookie = create_session(
         uid=user["id"],
         name=user.get("username", ""),
@@ -129,68 +88,100 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
     return response
 
 
+@staff_router.get("/api/me")
+async def api_me(request: Request):
+    user = _current_user(request)
+    if user is None or not user.get("is_staff"):
+        raise HTTPException(status_code=401, detail="Требуется вход как стафф")
+    return {"uid": user["uid"], "name": user.get("name", ""), "is_staff": True}
+
+
+@staff_router.get("/api/staff/login-url")
+async def api_login_url(request: Request):
+    ctx = _ctx(request)
+    settings = ctx.settings
+    if not settings.oauth_client_id or not settings.oauth_client_secret:
+        return _error_json(500, "OAuth не настроен (.env: OAUTH_CLIENT_ID/SECRET)")
+    state = py_secrets.token_urlsafe(24)
+    request.app.state.oauth_state = state
+    url = build_authorize_url(
+        client_id=settings.oauth_client_id,
+        redirect_uri=settings.oauth_redirect_uri,
+        state=state,
+    )
+    return {"url": url}
+
+
+@staff_router.post("/api/staff/logout")
+async def api_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE)
+    return response
+
+
 @staff_router.post("/auth/logout")
-async def logout():
+async def logout_redirect():
     response = RedirectResponse("/staff/login", status_code=302)
     response.delete_cookie(SESSION_COOKIE)
     return response
 
 
-@staff_router.get("/staff", response_class=HTMLResponse)
-async def staff_dashboard(request: Request) -> HTMLResponse:
-    user = _require_staff(request)
-    ctx = _ctx(request)
-    applications = (
-        await ctx.applications.list_tickets(statuses=("open", "claimed"))
-        if ctx.applications
-        else []
-    )
-    events = await ctx.plus.list_events(status="active") if ctx.plus else []
-    return _templates(request).TemplateResponse(
-        request,
-        "staff_dashboard.html",
-        {
-            "title": "Панель · Akiyama",
-            "user": user,
-            "open_tickets": len(applications),
-            "active_events": len(events),
-            "online_count": ctx.online.online_count,
-            "site_url": ctx.settings.site_url,
-        },
-    )
+# --- Заявки --------------------------------------------------------------------
 
 
-@staff_router.get("/staff/applications", response_class=HTMLResponse)
-async def staff_applications(
-    request: Request, status: str = "open", kind: str = ""
-) -> HTMLResponse:
-    user = _require_staff(request)
+def _ticket_json(ticket, answers: list[dict], applicant_label: str, handler_label: str) -> dict:
+    def iso(value):
+        return value.isoformat() if isinstance(value, datetime) else None
+
+    return {
+        "id": ticket.id,
+        "channel_id": ticket.channel_id,
+        "applicant_id": ticket.applicant_id,
+        "kind": ticket.kind,
+        "handler_id": ticket.handler_id,
+        "status": ticket.status,
+        "answers": answers,
+        "applicant_replied": ticket.applicant_replied,
+        "rejection_reason": ticket.rejection_reason,
+        "created_at": iso(ticket.created_at),
+        "claimed_at": iso(ticket.claimed_at),
+        "closed_at": iso(ticket.closed_at),
+        "applicant_label": applicant_label,
+        "handler_label": handler_label,
+    }
+
+
+@staff_router.get("/api/staff/tickets")
+async def api_staff_tickets(request: Request, status: str = "open", kind: str = ""):
+    _require_staff(request)
     ctx = _ctx(request)
-    if applications_cog := ctx.applications:
-        if status == "all":
-            tickets = await applications_cog.list_tickets(kind=kind or None)
-        else:
-            tickets = await applications_cog.list_tickets(
-                statuses=(status,), kind=kind or None
-            )
+    if not (applications_cog := ctx.applications):
+        return {"tickets": []}
+    if status == "all":
+        tickets = await applications_cog.list_tickets(kind=kind or None)
     else:
-        tickets = []
-    return _templates(request).TemplateResponse(
-        request,
-        "staff_applications.html",
-        {
-            "title": "Заявки · Панель",
-            "user": user,
-            "tickets": tickets,
-            "status": status,
-            "kind": kind,
-        },
-    )
+        tickets = await applications_cog.list_tickets(statuses=(status,), kind=kind or None)
+    guild = ctx.guild
+
+    def brief(ticket):
+        member = guild.get_member(ticket.applicant_id) if guild else None
+        label = member.display_name if member is not None else f"user:{ticket.applicant_id}"
+        return {
+            "id": ticket.id,
+            "channel_id": ticket.channel_id,
+            "kind": ticket.kind,
+            "status": ticket.status,
+            "handler_id": ticket.handler_id,
+            "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+            "applicant_label": label,
+        }
+
+    return {"tickets": [brief(t) for t in tickets]}
 
 
-@staff_router.get("/staff/applications/{ticket_id}", response_class=HTMLResponse)
-async def staff_ticket(request: Request, ticket_id: int) -> HTMLResponse:
-    user = _require_staff(request)
+@staff_router.get("/api/staff/tickets/{ticket_id}")
+async def api_staff_ticket(request: Request, ticket_id: int):
+    _require_staff(request)
     ctx = _ctx(request)
     ticket = await ctx.applications.get_ticket(ticket_id)
     if ticket is None:
@@ -200,97 +191,82 @@ async def staff_ticket(request: Request, ticket_id: int) -> HTMLResponse:
     except json.JSONDecodeError:
         answers = []
     guild = ctx.guild
-    applicant_name = guild.get_member(ticket.applicant_id)
-    if applicant_name is not None:
-        applicant_label = applicant_name.display_name
+    applicant_member = guild.get_member(ticket.applicant_id) if guild else None
+    if applicant_member is not None:
+        applicant_label = applicant_member.display_name
     else:
         applicant_label = f"user:{ticket.applicant_id}"
-    handler = guild.get_member(ticket.handler_id) if ticket.handler_id else None
-    return _templates(request).TemplateResponse(
-        request,
-        "staff_ticket.html",
-        {
-            "title": f"Заявка #{ticket.id} · Панель",
-            "user": user,
-            "ticket": ticket,
-            "answers": answers,
-            "applicant_label": applicant_label,
-            "handler_label": handler.display_name if handler else "—",
-            "kind_label": "Main" if ticket.kind == "main" else "VZP",
-        },
-    )
+    handler_member = guild.get_member(ticket.handler_id) if guild and ticket.handler_id else None
+    handler_label = handler_member.display_name if handler_member is not None else "—"
+    return _ticket_json(ticket, answers, applicant_label, handler_label)
 
 
-@staff_router.post("/staff/applications/{ticket_id}/claim")
-async def staff_claim(request: Request, ticket_id: int):
+@staff_router.post("/api/staff/tickets/{ticket_id}/claim")
+async def api_claim(request: Request, ticket_id: int):
     user = _require_staff(request)
     ctx = _ctx(request)
     ok, message = await ctx.applications.claim_ticket(ticket_id, user["uid"], f"@{user['name']}")
-    if ok:
-        return RedirectResponse("/staff/applications?status=open", status_code=302)
-    return _flash(request, message, "/staff/applications")
+    return JSONResponse({"ok": ok, "message": message})
 
 
-@staff_router.post("/staff/applications/{ticket_id}/release")
-async def staff_release(request: Request, ticket_id: int):
+@staff_router.post("/api/staff/tickets/{ticket_id}/release")
+async def api_release(request: Request, ticket_id: int):
     _require_staff(request)
     ctx = _ctx(request)
-    ok, _ = await ctx.applications.release_ticket(ticket_id)
-    return RedirectResponse("/staff/applications?status=open", status_code=302) if ok else _flash(
-        request, "Тикет не найден.", "/staff/applications"
-    )
+    ok, message = await ctx.applications.release_ticket(ticket_id)
+    return JSONResponse({"ok": ok, "message": message})
 
 
-@staff_router.post("/staff/applications/{ticket_id}/accept")
-async def staff_accept(request: Request, ticket_id: int):
+@staff_router.post("/api/staff/tickets/{ticket_id}/accept")
+async def api_accept(request: Request, ticket_id: int):
     _require_staff(request)
     ctx = _ctx(request)
     guild = ctx.guild
     if guild is None:
-        raise HTTPException(status_code=500, detail="Бот не на сервере")
-    ok, _ = await ctx.applications.accept_ticket(ticket_id, guild)
-    return RedirectResponse("/staff/applications?status=open", status_code=302) if ok else _flash(
-        request, "Не удалось принять.", "/staff/applications"
-    )
+        return _error_json(500, "Бот не на сервере")
+    ok, message = await ctx.applications.accept_ticket(ticket_id, guild)
+    return JSONResponse({"ok": ok, "message": message})
 
 
-@staff_router.post("/staff/applications/{ticket_id}/reject")
-async def staff_reject(
-    request: Request, ticket_id: int, reason: str = Form("")
-):
+@staff_router.post("/api/staff/tickets/{ticket_id}/reject")
+async def api_reject(request: Request, ticket_id: int, reason: str = Form("")):
     _require_staff(request)
     ctx = _ctx(request)
     guild = ctx.guild
     if guild is None:
-        raise HTTPException(status_code=500, detail="Бот не на сервере")
+        return _error_json(500, "Бот не на сервере")
     reason_text = reason.strip() or "(без причины)"
-    ok, _ = await ctx.applications.reject_ticket(ticket_id, reason_text, guild)
-    return RedirectResponse("/staff/applications?status=open", status_code=302) if ok else _flash(
-        request, "Не удалось отклонить.", "/staff/applications"
-    )
+    ok, message = await ctx.applications.reject_ticket(ticket_id, reason_text, guild)
+    return JSONResponse({"ok": ok, "message": message})
 
 
-def _flash(request: Request, message: str, target: str) -> RedirectResponse:
-    """Показать ошибку-flash — передаём через query (message подписывать не нужно)."""
-    return RedirectResponse(
-        f"{target}?flash={urllib.parse.quote(message)}", status_code=302
-    )
+# --- Сборы ---------------------------------------------------------------------
 
 
-@staff_router.get("/staff/gatherings", response_class=HTMLResponse)
-async def staff_gatherings(request: Request) -> HTMLResponse:
-    user = _require_staff(request)
+def _event_json(event) -> dict:
+    return {
+        "id": event.id,
+        "channel_id": event.channel_id,
+        "creator_id": event.creator_id,
+        "title": event.title,
+        "reason": event.reason,
+        "event_time": event.event_time.isoformat() if event.event_time else None,
+        "need_static": event.need_static,
+        "is_active": event.is_active,
+        "event_kind": event.event_kind,
+    }
+
+
+@staff_router.get("/api/staff/gatherings")
+async def api_staff_gatherings(request: Request):
+    _require_staff(request)
     ctx = _ctx(request)
     events = await ctx.plus.list_events(status="active") if ctx.plus else []
-    return _templates(request).TemplateResponse(
-        request,
-        "staff_gatherings.html",
-        {"title": "Сборы · Панель", "user": user, "events": events, "moscow": MOSCOW_TZ},
-    )
+    return {"gatherings": [_event_json(e) for e in events]}
 
 
-@staff_router.post("/staff/gatherings/create")
-async def staff_create_gathering(
+@staff_router.post("/api/staff/gatherings")
+async def api_staff_create_gathering(
     request: Request,
     kind: str = Form("general"),
     reason: str = Form(""),
@@ -302,18 +278,16 @@ async def staff_create_gathering(
     ctx = _ctx(request)
     guild = ctx.guild
     if guild is None:
-        raise HTTPException(status_code=500, detail="Бот не на сервере")
+        return _error_json(500, "Бот не на сервере")
     channel = guild.get_channel(PLUS_DEF_CHANNEL_ID)
     if channel is None:
-        raise HTTPException(status_code=500, detail="Не задан PLUS_DEF_CHANNEL_ID")
+        return _error_json(500, "Не задан PLUS_DEF_CHANNEL_ID")
     if kind not in PLUS_KIND_LABELS:
-        raise HTTPException(status_code=400, detail="Неизвестный тип сбора")
+        return _error_json(400, "Неизвестный тип сбора")
     try:
         event_time_dt = datetime.strptime(event_time, "%Y-%m-%dT%H:%M")
     except ValueError:
-        raise HTTPException(
-            status_code=400, detail="Неверный формат времени"
-        ) from None
+        return _error_json(400, "Неверный формат времени")
     event_time_dt = event_time_dt.replace(tzinfo=ZoneInfo(MOSCOW_TZ))
     event = await ctx.plus.create_event(
         channel,
@@ -326,5 +300,5 @@ async def staff_create_gathering(
         ping_role=PLUS_KIND_PINGS.get(kind) or None,
     )
     if event is None:
-        return _flash(request, "Не удалось создать сбор.", "/staff/gatherings")
-    return RedirectResponse("/staff/gatherings", status_code=302)
+        return _error_json(500, "Не удалось создать сбор")
+    return JSONResponse({"ok": True, "id": event.id})

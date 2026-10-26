@@ -21,3 +21,5 @@ dist
 build
 docker-compose.yml
 Dockerfile
+frontend/node_modules
+frontend/dist

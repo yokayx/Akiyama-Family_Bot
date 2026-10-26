@@ -208,6 +208,8 @@ class Settings(BaseSettings):
     site_url: str = "https://akiyama-5rp.ru"
     # HMAC-ключ для подписи cookie сессии сайта (WEB_SECRET в .env).
     web_secret: str = ""
+    # Сборка фронтенда (Vite): index.html + assets. Пусто — API без SPA.
+    web_static_dir: str = "frontend/dist"
 
     # --- Онлайн-статистика сервера (gta5masterlist.ru, публичный JSON) ---
     # GTA5RP Blaine = serverId 27. Имя для отображения — как в конфиге.
