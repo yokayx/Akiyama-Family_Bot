@@ -85,7 +85,6 @@ async def online_page(request: Request) -> HTMLResponse:
         {
             "title": "Онлайн · Akiyama",
             "online_count": online.online_count,
-            "online_names": online.online_names,
             "server_name": online.server_name,
             "error": online.error,
         },
@@ -145,7 +144,6 @@ async def api_online(request: Request) -> JSONResponse:
         {
             "server": online.server_name,
             "online": online.online_count,
-            "names": online.online_names,
             "error": online.error,
         }
     )

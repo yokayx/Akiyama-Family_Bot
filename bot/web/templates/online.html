@@ -9,12 +9,4 @@
   {% endif %}
   {% if error %}<p class="error-note">{{ error }}</p>{% endif %}
 </section>
-{% if online_names %}
-<section class="panel">
-  <h2>Кто в игре</h2>
-  <ul class="name-list">
-    {% for name in online_names %}<li>{{ name }}</li>{% endfor %}
-  </ul>
-</section>
-{% endif %}
 {% endblock %}

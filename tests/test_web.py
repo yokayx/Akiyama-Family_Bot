@@ -60,7 +60,7 @@ def _make_ctx() -> WebContext:
     online = OnlineCache(
         api_url="https://example.com/api/{server_id}/online",
         server_id=8,
-        server_name="Richman",
+        server_name="Blaine",
     )
     online.online_count = 42
     online.updated = time.time()
@@ -113,22 +113,36 @@ def test_oauth_url_contains_params() -> None:
 # --- Онлайн-кэш ---------------------------------------------------------------
 
 
-def test_online_parse_int() -> None:
-    count, names = OnlineCache._parse({"online": 15})
-    assert (count, names) == (15, [])
+def _cache() -> OnlineCache:
+    return OnlineCache(
+        api_url="https://example.com/api/servers", server_id=27, server_name="Blaine"
+    )
 
 
-def test_online_parse_list() -> None:
-    count, names = OnlineCache._parse({"online": ["a", "b"]})
-    assert (count, names) == (2, ["a", "b"])
+def test_online_finds_server_in_list() -> None:
+    """/api/servers → вложенный лист по проектам, фильтр по serverId."""
+    data = {
+        "gta5rp": [
+            {"serverId": 26, "name": "Mirror", "currentOnline": 3377},
+            {"serverId": 27, "name": "Blaine", "currentOnline": 5499},
+        ]
+    }
+    assert _cache()._find_online(data) == 5499
 
 
-def test_online_parse_bare_list() -> None:
-    assert OnlineCache._parse([1, 2, 3])[0] == 3
+def test_online_single_server_object() -> None:
+    data = {"serverId": 27, "name": "Blaine", "currentOnline": 42}
+    assert _cache()._find_online(data) == 42
 
 
-def test_online_parse_unknown() -> None:
-    assert OnlineCache._parse({"weird": True}) == (None, [])
+def test_online_bare_list() -> None:
+    data = [{"serverId": 27, "currentOnline": 7}]
+    assert _cache()._find_online(data) == 7
+
+
+def test_online_unknown_server() -> None:
+    assert _cache()._find_online({"gta5rp": [{"serverId": 99}]}) is None
+    assert _cache()._find_online({"weird": True}) is None
 
 
 # --- Публичные страницы -------------------------------------------------------
@@ -160,7 +174,7 @@ async def test_online_page_renders() -> None:
     async with _client(_make_ctx()) as client:
         response = await client.get("/online")
     assert response.status_code == 200
-    assert "Richman" in response.text
+    assert "Blaine" in response.text
 
 
 async def test_gatherings_page_renders() -> None:
@@ -177,6 +191,7 @@ async def test_api_endpoints_json() -> None:
     assert roster.status_code == 200
     assert roster.json()["unique_count"] == 3
     assert online.json()["online"] == 42
+    assert "names" not in online.json()
     assert isinstance(stats.json(), dict)
 
 

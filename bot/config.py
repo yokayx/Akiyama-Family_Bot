@@ -210,11 +210,12 @@ class Settings(BaseSettings):
     web_secret: str = ""
 
     # --- Онлайн-статистика сервера (gta5masterlist.ru, публичный JSON) ---
-    # GTA5RP Richman = serverId 8. Имя для отображения — как в конфиге.
-    online_server_id: int = 8
-    online_server_name: str = "Richman"
-    # Template URL JSON; {server_id} подставляется online_server_id.
-    online_api_url: str = "https://gta5masterlist.ru/api/servers/{server_id}/online"
+    # GTA5RP Blaine = serverId 27. Имя для отображения — как в конфиге.
+    online_server_id: int = 27
+    online_server_name: str = "Blaine"
+    # /api/servers — лист всех серверов (gta5rp/majestic/...), фильтруем по
+    # serverId. Можно переопределить URL целиком.
+    online_api_url: str = "https://gta5masterlist.ru/api/servers"
 
 
 def load_settings() -> Settings:

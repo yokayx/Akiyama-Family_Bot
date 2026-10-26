@@ -27,7 +27,7 @@
    - Указать Client ID / Client Secret в `.env` (`OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`).
 3. **`.env`** (см. `.env.example`):
    - `WEB_SECRET` — ключ сессии панели: `openssl rand -hex 32`
-   - `ONLINE_SERVER_ID=8`, `ONLINE_SERVER_NAME=Richman` (GTA5RP)
+   - `ONLINE_SERVER_ID=27`, `ONLINE_SERVER_NAME=Blaine` (GTA5RP Blaine, gta5masterlist.ru)
    - `PLUS_DEF_CHANNEL_ID` — канал, где создаются сборы из панели.
 
 ## Запуск
@@ -40,11 +40,13 @@ docker compose up -d --build
 
 ## Caddy
 
-Файл `Caddyfile` в репозитории — плейлист для домена: TLS через Let's Encrypt,
-проксирование на `127.0.0.1:8080`. Сюда же виться `www`.
+Ваш Caddy уже проксирует другой проект на этом хосте (`http://:80`, SPA +
+`/api/*`). Не трогайте его — **добавьте блок для домена** из файла
+`Caddyfile` в репозитории (он берёт приоритет по Host заголовку над
+catch-all `:80`). Там же есть комментарии.
 
-Скопировать `Caddyfile` на сервер (в `~/.config/caddy/Caddyfile` или `/etc/caddy/Caddyfile`)
-и перезагрузить:
+Предварительное условие: A-запись `akiyama-5rp.ru` → IP хоста.
+После добавления блока:
 
 ```bash
 caddy reload    # или systemctl reload caddy

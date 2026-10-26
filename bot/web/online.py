@@ -1,7 +1,8 @@
 """Онлайн-статистика сервера (gta5masterlist.ru, публичный JSON).
 
-Фетчит JSON с периодом ONLINE_POLL_SECONDS и держит результат в памяти.
-API-URL берётся из конфига — templates: {server_id} подставляется ID сервера.
+API /api/servers возвращает лист серверов (gta5rp/majestic/...), каждый со
+serverId, name и currentOnline. Мы фильтруем по online_server_id и кэшим
+результат с периодом ONLINE_POLL_SECONDS.
 """
 from __future__ import annotations
 
@@ -33,7 +34,6 @@ class OnlineCache:
         self.server_name = server_name
         self._poll_seconds = max(15, poll_seconds)
         self.online_count: int | None = None
-        self.online_names: list[str] = []
         self.updated: float | None = None
         self.error: str | None = None
         self._lock = asyncio.Lock()
@@ -61,34 +61,36 @@ class OnlineCache:
             await asyncio.sleep(self._poll_seconds)
 
     async def fetch(self) -> None:
-        url = self._api_url.format(server_id=self._server_id)
         async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(url)
+            response = await client.get(self._api_url)
             response.raise_for_status()
             data = response.json()
         self._apply(data)
 
     def _apply(self, data: Any) -> None:
-        count, names = self._parse(data)
-        self.online_count = count
-        self.online_names = names
+        self.online_count = self._find_online(data)
         self.updated = time.time()
         self.error = None
 
+    def _find_online(self, data: Any) -> int | None:
+        """currentOnline сервера с нашим serverId. None, если не нашёл."""
+        for server in self._server_list(data):
+            if str(server.get("serverId")) == str(self._server_id):
+                online = server.get("currentOnline")
+                return online if isinstance(online, int) else None
+        return None
+
     @staticmethod
-    def _parse(data: Any) -> tuple[int | None, list[str]]:
-        """Толерантный разбор ответа — принимаем known форматы JSON."""
-        if isinstance(data, dict):
-            for key in ("online", "online_count", "onlineCount", "players", "player_count"):
-                value = data.get(key)
-                if isinstance(value, int):
-                    return value, []
-                if isinstance(value, list):
-                    return len(value), [str(item) for item in value]
-            names = data.get("online_nicks") or data.get("names")
-            if isinstance(names, list):
-                return len(names), [str(item) for item in names]
-            return None, []
+    def _server_list(data: Any) -> list[dict]:
+        """/api/servers → лист всех серверов (nested по проектам)."""
         if isinstance(data, list):
-            return len(data), [str(item) for item in data]
-        return None, []
+            return [s for s in data if isinstance(s, dict)]
+        if isinstance(data, dict):
+            # Случайный сервер как один объект (специфичный endpoint).
+            if "serverId" in data or "currentOnline" in data:
+                return [data]
+            for key in ("gta5rp", "majestic", "russiaonline", "servers", "data"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return [s for s in value if isinstance(s, dict)]
+        return []
