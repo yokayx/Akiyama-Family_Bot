@@ -1,14 +1,34 @@
 # akiyama-5rp.ru — сайт семьи Akiyama (бот в Docker, порт 8080)
 #
+# Как сайт попадает в интернет — выберите один способ:
+#
+#   1) Caddy на хосте с публичным IP (этот файл). Нужны входящие TCP 80 и 443,
+#      доходящие до этого хоста (проброс на роутере + файрвол). Сертификат
+#      Let's Encrypt Caddy выпустит сам.
+#
+#   2) Cloudflare Tunnel (docs/https.md, вариант A) — порты и белый IP не нужны:
+#         docker compose --profile tunnel up -d
+#      Тогда этот блок для домена не используется, Caddy можно не трогать.
+#
 # ВАЖНО: ваш Caddy уже слушает http://:80 для другого приложения
 # (SPA /srv + /api/* → backend:8030). Не трогайте его. Добавьте только этот
 # блок — Caddy роутинг по Host: для akiyama-5rp.ru отдаст этот сайт,
 # для других Host — прежний.
 #
-# Предварительное условие: A-запись akiyama-5rp.ru → IP этого хоста.
-# TLS подхватится автоматически через Let's Encrypt.
+# Предварительное условие: A-запись akiyama-5rp.ru → IP этого хоста И порты
+# 80/443 реально доходят до Caddy. Проверка в одну команду:
+#     bash tools/diagnose_site.sh
+# Если провайдер режет 80 (частое у домашних тарифов) — нужен DNS-01 через
+# Cloudflare API или туннель; подробности в docs/https.md.
 
-akiyama-5rp.ru, www.akiyama-5rp.ru {
+{
+    # Единственный global-блок на весь Caddyfile и только в начале файла.
+    # Если у вас уже есть global options — не копируйте этот блок вторым,
+    # просто добавьте в свой строку email.
+    email admin@akiyama-5rp.ru
+}
+
+akiyama-5rp.ru {
     encode zstd gzip
 
     header {
@@ -17,10 +37,25 @@ akiyama-5rp.ru, www.akiyama-5rp.ru {
         X-Frame-Options DENY
     }
 
+    # Файлы Vite с хэшем в имени можно кэшировать навсегда.
     @static {
         path_regexp static \.(css|js|png|jpe?g|svg|woff2?|ico|webp)$
     }
     header @static Cache-Control "public, max-age=2592000, immutable"
 
-    reverse_proxy / 127.0.0.1:8080
+    # Всё остальное (index.html, клиентские маршруты /staff, /vzp, JSON API) —
+    # не кэшировать, иначе после выкладки браузер держит старый бандл.
+    @dynamic not path_regexp \.(css|js|png|jpe?g|svg|woff2?|ico|webp)$
+    header @dynamic Cache-Control "no-cache"
+
+    reverse_proxy 127.0.0.1:8080
 }
+
+# www — ТОЛЬКО если в Cloudflare есть запись для www.akiyama-5rp.ru
+# (CNAME на akiyama-5rp.ru, proxied, или A на тот же IP).
+# Записи нет — Caddy будет бесконечно пытаться выпустить на это имя сертификат
+# и сыпать ошибками ACME в лог. Нет DNS — оставьте блок закомментированным.
+#
+# www.akiyama-5rp.ru {
+#     redir https://akiyama-5rp.ru{uri} permanent
+# }

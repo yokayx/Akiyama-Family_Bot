@@ -12,9 +12,35 @@ services:
       DATABASE_URL: sqlite+aiosqlite:///data/akiyama.db
     volumes:
       - ./data:/app/data
-    # Сайт akiyama-5rp.ru (FastAPI) — Caddy проксирует с этого порта.
+    # Сайт (FastAPI) слушает только localhost: снаружи его отдаёт Caddy
+    # (проброс 80/443) или туннель Cloudflare — см. docs/https.md.
     ports:
       - "127.0.0.1:8080:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Сайт по HTTPS без проброса портов и белого IP (docs/https.md, вариант A).
+  # Включается профилем, по умолчанию не запускается:
+  #   CLOUDFLARE_TUNNEL_TOKEN=... в .env
+  #   docker compose --profile tunnel up -d
+  # Публичный хостнейм akiyama-5rp.ru → http://localhost:8080 задаётся
+  # в Zero Trust → Networks → Tunnels → Public hostname.
+  # Без токена контейнер упадёт с "token is required" — это нормально,
+  # профиль просто не используется, остальной compose работает как раньше.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: akiyama-tunnel
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    depends_on:
+      - bot
+    # Сетевое пространство бота: cloudflared ходит в 127.0.0.1:8080,
+    # наружу ничего не публикуется.
+    network_mode: "service:bot"
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
     logging:
       driver: json-file
       options:

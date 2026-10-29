@@ -42,6 +42,10 @@ npm run dev        # http://localhost:5173, /api/* и /auth/* проксирую
 
 ## Подготовка продакшена
 
+> Если браузер пишет «Сайт отправил недействительный ответ» — это не код сайта,
+> а сеть: до Caddy/до контейнера не доходят запросы. Разбор и починка —
+> [https.md](https.md).
+
 1. **DNS**: добавить A-запись `akiyama-5rp.ru` (и `www`) на сервер с Caddy.
 2. **Discord OAuth-приложение**: Discord Developer Portal → OAuth2 → URL Generator
    - Scopes: `identify`, `guilds`
@@ -61,6 +65,19 @@ docker compose up -d --build
 Dockerfile мультистаг: сначала `npm run build` (frontend), потом dist кладётся
 в образ бота — сайт и API в одном контейнере на `127.0.0.1:8080`.
 
+Без белого IP / с CGNAT сайт отдаётся через Cloudflare Tunnel — профиль
+`tunnel` в compose (порты 80/443 не нужны):
+
+```bash
+# CLOUDFLARE_TUNNEL_TOKEN=... в .env
+docker compose --profile tunnel up -d
+docker compose logs -f tunnel
+curl -I https://akiyama-5rp.ru/api/health     # 200
+```
+
+Пошагово (Zero Trust, публичный хостнейм, что делать со старой A-записью) —
+[https.md](https.md).
+
 ## Caddy
 
 Ваш Caddy уже проксирует другой проект на этом хосте (`http://:80`, SPA +
@@ -68,12 +85,22 @@ Dockerfile мультистаг: сначала `npm run build` (frontend), по
 `Caddyfile` в репозитории (он берёт приоритет по Host заголовку над
 catch-all `:80`). Там же есть комментарии.
 
-Предварительное условие: A-запись `akiyama-5rp.ru` → IP хоста.
+Предварительное условие: A-запись `akiyama-5rp.ru` → IP хоста И входящие
+80/443 реально доходят до Caddy. Проверка — скрипт `tools/diagnose_site.sh`
+(сверяет внешний IP с DNS, смотрит слушателей портов, сертификаты и лог ACME).
+
 После добавления блока:
 
 ```bash
+caddy validate --config /etc/caddy/Caddyfile
 caddy reload    # или systemctl reload caddy
 ```
+
+`www.akiyama-5rp.ru` в конфиге — только если для него есть DNS-запись
+(сейчас её нет: Caddy будет вечно пытаться выпустить на это имя сертификат).
+
+Если провайдер режет входящий 80 — Caddy не получит сертификат по HTTP-01;
+нужен DNS-01 через Cloudflare API или туннель, см. docs/https.md.
 
 ## Тесты
 

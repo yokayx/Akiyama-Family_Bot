@@ -45,6 +45,17 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
+## Сайт и HTTPS
+
+Сайт (`akiyama-5rp.ru`) живёт в том же процессе, что и бот: FastAPI на
+`127.0.0.1:8080`, снаружи его отдаёт Caddy (проброс 80/443) или Cloudflare
+Tunnel (белый IP и порты не нужны).
+
+- Браузер пишет **«Сайт отправил недействительный ответ»** →
+  [docs/https.md](docs/https.md): разбор, почему так, и три варианта починки.
+- Быстрая диагностика на сервере: `bash tools/diagnose_site.sh`.
+- Проверка живости сайта: `curl -I https://akiyama-5rp.ru/api/health`.
+
 ## Тесты
 
 ```bash

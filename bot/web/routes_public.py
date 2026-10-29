@@ -13,6 +13,16 @@ def _ctx(request: Request):
     return request.app.state.ctx
 
 
+@public_router.api_route("/api/health", methods=["GET", "HEAD"])
+async def api_health() -> JSONResponse:
+    """Проверка живости сайта: 200 и короткий JSON.
+
+    Нужна мониторингу и проверке после настройки HTTPS/туннеля:
+    `curl -I https://akiyama-5rp.ru/api/health`.
+    """
+    return JSONResponse({"ok": True, "service": "akiyama-site"})
+
+
 @public_router.get("/api/roster")
 async def api_roster(request: Request) -> JSONResponse:
     ctx = _ctx(request)

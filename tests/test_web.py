@@ -275,6 +275,18 @@ async def test_staff_create_gathering_no_channel() -> None:
     assert response.json()["ok"] is False
 
 
+# --- Health -------------------------------------------------------------------
+
+async def test_health_endpoint() -> None:
+    """Эндпоинт для мониторинга и проверки HTTPS после настройки прокси."""
+    async with _client(_make_ctx()) as client:
+        response = await client.get("/api/health")
+        head = await client.head("/api/health")
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert head.status_code == 200  # curl -I (HEAD) должен работать
+
+
 # --- SPA хостинг --------------------------------------------------------------
 
 
