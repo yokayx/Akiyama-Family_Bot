@@ -136,7 +136,7 @@ if have ss || have netstat; then
         bad "порт 443 НИКТО НЕ СЛУШАЕТ — это и есть «сайт отправил недействительный ответ»"
         info "TCP кто-то принимает (роутер), но TLS-рукопожатие некому вести:"
         info "сервер молча закрывает соединение, браузер получает 0 байт."
-        tip "Без sudo: добавьте блок из deploy/caddy/akiyama.caddyfile в свой Caddy (Apella.ru) и caddy reload."
+        tip "Без sudo: добавьте блок из deploy/caddy/akiyama.caddyfile в тот веб-сервер, который держит :80 (см. раздел 6), и перезагрузите его."
         tip "С sudo: блок из Caddyfile в системный конфиг Caddy и sudo systemctl reload caddy (вариант B)."
         tip "Или не занимайте 443 вообще: Cloudflare Tunnel (docs/https.md, вариант A)."
         if ! is_root; then
@@ -201,90 +201,133 @@ if [ -z "$H_SRV" ] && [ -n "$H_CODE" ]; then
     info "заголовка Server нет — часто признак Cloudflare Tunnel или Caddy"
 fi
 
-# --- 6. Что за сервер 80/443: службы и бинарники --------------------------------
-section "6. Службы, которые могут держать TLS"
+# --- 6. Кто обслуживает 80/443 ---------------------------------------------------
+section "6. Кто обслуживает порты 80 / 443"
+UPSTREAM=""
+
+# 6.1 Что отвечает на loopback (работает без sudo)
+L80="$(curl -sI --max-time 5 http://127.0.0.1/ 2>/dev/null | tr -d '\r')"
+if [ -n "$L80" ]; then
+    SRV="$(printf '%s' "$L80" | awk 'tolower($1)=="server:"{print $2; exit}')"
+    ST="$(printf '%s' "$L80" | awk 'NR==1{print $2}')"
+    info "http://127.0.0.1/ → ${ST:-?}   Server: ${SRV:-нет заголовка}"
+    case "$(printf '%s' "$SRV" | tr 'A-Z' 'a-z')" in
+        caddy) ok "на :80 отвечает Caddy — его Caddyfile и есть точка входа" ;;
+        nginx) info "на :80 отвечает nginx — блок для домена нужно добавить в его конфиг" ;;
+        "") info "заголовка Server нет: Caddy его не отдаёт по умолчанию, но и nginx может скрывать" ;;
+        *) info "на :80 отвечает «$SRV»" ;;
+    esac
+    D80="$(curl -sI --max-time 5 -H "Host: $DOMAIN" http://127.0.0.1/ 2>/dev/null | tr -d '\r' \
+        | awk 'NR==1{print $2}')"
+    info "http://127.0.0.1/ с Host: $DOMAIN → ${D80:-нет ответа}"
+else
+    warn "на 127.0.0.1:80 никто не ответил — слушатель есть, но не отвечает на HTTP"
+fi
+
+# 6.2 Контейнеры, публикующие 80/443
+DOCKER_WEB_CONTAINERS=""
+if have docker; then
+    if ! docker info >/dev/null 2>&1; then
+        warn "docker недоступен текущему пользователю (нет прав на сокет) — секция пропущена"
+    else
+        info "контейнеры, публикующие порты:"
+        docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null \
+            | sed 's/^/       /'
+        DOCKER_WEB_CONTAINERS="$(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null \
+            | awk -F'\t' 'tolower($3) ~ /:(80|443)->/ {print $1}')"
+        if [ -z "$DOCKER_WEB_CONTAINERS" ]; then
+            info "ни один контейнер не публикует 80/443 → на этих портах работает служба хоста, а не Docker"
+        fi
+    fi
+else
+    warn "docker не найден"
+fi
+
+# Для каждого контейнера, который держит 80/443, печатаем сеть/конфиг/вердикт
+for ct in $DOCKER_WEB_CONTAINERS; do
+    IMG="$(docker inspect "$ct" -f '{{.Config.Image}}' 2>/dev/null)"
+    NETMODE="$(docker inspect "$ct" -f '{{.HostConfig.NetworkMode}}' 2>/dev/null)"
+    ok "контейнер «$ct» (образ $IMG) держит 80/443, сеть: $NETMODE"
+
+    CFG_HOST=""
+    while IFS=$'\t' read -r SRC DST; do
+        [ -z "$DST" ] && continue
+        case "$DST" in
+            *[Cc]addyfile*|*/etc/nginx*|*/etc/apache2*) CFG_HOST="$SRC"; printf '       конфиг: %s → %s\n' "$SRC" "$DST" ;;
+        esac
+    done <<< "$(docker inspect "$ct" -f '{{range .Mounts}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}' 2>/dev/null)"
+
+    if [ "$NETMODE" = "bridge" ] || [ "$NETMODE" = "default" ]; then
+        UPSTREAM="akiyama-bot:8080"
+        tip "веб-сервер в bridge-сети: reverse_proxy должен смотреть на $UPSTREAM, а не 127.0.0.1:8080"
+        tip "добавьте боту сеть этого контейнера: docker network ls → networks: [имя] в docker-compose.yml"
+    else
+        UPSTREAM="127.0.0.1:8080"
+    fi
+
+    if [ -n "$CFG_HOST" ] && [ -r "$CFG_HOST" ]; then
+        if grep -q "$DOMAIN" "$CFG_HOST" 2>/dev/null; then
+            ok "в $CFG_HOST уже есть блок для $DOMAIN — вопрос только в 443 и пробросe"
+        else
+            bad "в $CFG_HOST нет блока для $DOMAIN"
+            tip "Добавьте блок из deploy/caddy/akiyama.caddyfile в $CFG_HOST"
+            tip "Затем: docker exec $ct caddy reload --config /etc/caddy/Caddyfile"
+        fi
+    elif [ -n "$CFG_HOST" ]; then
+        info "конфиг $CFG_HOST не читается без root"
+        tip "Посмотреть без sudo: docker exec $ct cat /etc/caddy/Caddyfile"
+    fi
+done
+
+# 6.3 Caddy вне Docker (служба хоста) — status читается без sudo
 if have systemctl; then
     for svc in caddy nginx apache2 httpd traefik haproxy; do
         STATE="$(systemctl is-active "$svc" 2>/dev/null)"
+        case "$STATE" in ""|unknown) continue ;; esac
         case "$STATE" in
-            active)
-                ok "$svc: active"
-                if [ "$svc" = "caddy" ] && have journalctl; then
-                    ERR="$(journalctl -u caddy --no-pager -n 120 2>/dev/null \
-                        | grep -iE 'listen|bind|permission|acme|challenge|certificate' | tail -n 6)"
-                    [ -n "$ERR" ] && printf '%s\n' "$ERR" | sed 's/^/       /'
-                fi
-                ;;
-            inactive|failed)
-                info "$svc: $STATE"
-                [ "$svc" = "caddy" ] && tip "Запустите и проверьте: sudo systemctl start caddy && sudo journalctl -u caddy -n 50 --no-pager"
-                ;;
-            *)
-                ;;
+            active) ok "служба $svc: active" ;;
+            failed) bad "служба $svc: failed — смотрите systemctl status $svc" ;;
+            *) info "служба $svc: $STATE" ;;
         esac
     done
-else
-    warn "systemctl нет — службы не проверить"
-fi
 
-# Caddy, запущенный контейнером (например, от Apella.ru) — правится без sudo.
-if have docker; then
-    CADDY_NAMES="$(docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | awk 'tolower($0) ~ /caddy/ {print $1}')"
-    if [ -n "$CADDY_NAMES" ]; then
-        for ct in $CADDY_NAMES; do
-            ok "Caddy найден в Docker: $ct"
-            NETMODE="$(docker inspect "$ct" -f '{{.HostConfig.NetworkMode}}' 2>/dev/null)"
-            PUB="$(docker inspect "$ct" -f '{{json .HostConfig.PortBindings}}' 2>/dev/null)"
-            info "сеть: ${NETMODE:-?}   публикация: ${PUB:-?}"
-            info "конфиг (монтируется с хоста):"
-            docker inspect "$ct" -f '{{range .Mounts}}       {{.Source}} → {{.Destination}}{{"\n"}}{{end}}' 2>/dev/null \
-                | grep -v 'caddy_data\|caddy_config\|/data\|/config' || true
-
-            CFG_IN_CT="$(docker inspect "$ct" \
-                -f '{{range .Mounts}}{{if eq .Destination "/etc/caddy/Caddyfile"}}{{.Source}}{{end}}{{end}}' \
-                2>/dev/null)"
-            if [ -n "$CFG_IN_CT" ]; then
-                info "Caddyfile на хосте: $CFG_IN_CT"
-                if [ -r "$CFG_IN_CT" ]; then
-                    if grep -q "$DOMAIN" "$CFG_IN_CT" 2>/dev/null; then
-                        ok "в нём есть блок для $DOMAIN"
-                    else
-                        bad "в Caddyfile НЕТ блока для $DOMAIN"
-                        tip "Добавьте в $CFG_IN_CT строку: import deploy/caddy/akiyama.caddyfile (или скопируйте блок akiyama-5rp.ru { ... })"
-                        tip "Затем: docker exec $ct caddy reload --config /etc/caddy/Caddyfile"
-                    fi
-                    if grep -q 'import' "$CFG_IN_CT" 2>/dev/null; then
-                        info "файл использует import — проверьте, что путь к akiyama.caddyfile виден из контейнера"
-                    fi
-                    if [ "$NETMODE" = "bridge" ] || [ "$NETMODE" = "default" ]; then
-                        tip "Caddy в bridge-сети: reverse_proxy должен смотреть на akiyama-bot:8080, а не 127.0.0.1:8080"
-                        tip "Добавьте боту сеть Caddy: networks: [<сеть apella>] (docker network ls)"
-                    fi
+    if systemctl list-unit-files caddy.service >/dev/null 2>&1 \
+        && systemctl cat caddy >/dev/null 2>&1; then
+        info "юнит caddy:"
+        systemctl cat caddy 2>/dev/null | grep -E '^(ExecStart|Environment|User|WorkingDirectory)' \
+            | sed 's/^/       /'
+        for f in /etc/caddy/Caddyfile /etc/caddy/conf.d /srv/Caddyfile "$HOME/Caddyfile"; do
+            [ -e "$f" ] || continue
+            PERM="$(ls -ld "$f" 2>/dev/null | awk '{print $1, $3, $4}')"
+            info "$f ($PERM)"
+            if [ -r "$f" ] && [ -f "$f" ]; then
+                if grep -q "$DOMAIN" "$f" 2>/dev/null; then
+                    ok "в нём есть блок для $DOMAIN"
                 else
-                    warn "Caddyfile ($CFG_IN_CT) не читается без root — правьте его из папки проекта или через docker exec"
-                    tip "Посмотреть содержимое без sudo: docker exec $ct cat /etc/caddy/Caddyfile"
+                    bad "в нём нет блока для $DOMAIN"
+                fi
+                if [ -w "$f" ]; then
+                    ok "файл доступен на запись без sudo — можно править и перезагрузить"
+                else
+                    bad "файл не доступен на запись без sudo"
+                    tip "Править /etc/caddy без root нельзя: попросите владельца хоста выполнить одну команду (sudo caddy reload) после вашей правки, либо используйте туннель."
                 fi
             fi
         done
     fi
+else
+    info "systemctl нет — службы не проверить"
 fi
 
-if have caddy; then
-    info "caddy: $(caddy version 2>/dev/null | head -1)"
-    for cfg in /etc/caddy/Caddyfile "$HOME/Caddyfile" ./Caddyfile; do
-        [ -f "$cfg" ] || continue
-        info "конфиг: $cfg"
-        if grep -q "$DOMAIN" "$cfg" 2>/dev/null; then
-            ok "в конфиге есть $DOMAIN"
-        else
-            bad "в $cfg НЕТ блока для $DOMAIN → Caddy не будет слушать 443 за этот домен"
-            tip "Добавьте блок из Caddyfile репозитория и: sudo systemctl reload caddy"
-        fi
-        TEST="$(caddy validate --config "$cfg" --adapter caddyfile 2>&1 | tail -n 3)"
-        [ -n "$TEST" ] && printf '%s\n' "$TEST" | sed 's/^/       /'
-    done
-else
-    info "бинарника caddy в PATH нет — возможно, не установлен"
+# 6.4 Готовая заготовка блока для вставки в найденный веб-сервер
+if [ -n "$UPSTREAM" ]; then
+    section "6.4 Готовый блок (reverse_proxy $UPSTREAM)"
+    info "вставьте в Caddyfile рядом с другими доменами:"
+    printf '%s\n' "akiyama-5rp.ru {" \
+        "    encode zstd gzip" \
+        "    reverse_proxy $UPSTREAM" \
+        "}" | sed 's/^/       /'
+    info "полный блок с заголовками и кэшем — deploy/caddy/akiyama.caddyfile"
 fi
 
 # --- 7. Хранилище сертификатов и лог ACME --------------------------------------
