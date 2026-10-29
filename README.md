@@ -56,16 +56,22 @@ Tunnel (белый IP и порты не нужны).
 - Быстрая диагностика на сервере: `bash tools/diagnose_site.sh` (sudo не нужен).
 - Проверка живости сайта: `curl -I https://akiyama-5rp.ru/api/health`.
 
-Если Caddy на хосте правится только через sudo, а Docker доступен — HTTPS
-поднимает **Caddy в контейнере** на 443 (порт 80 не трогает, сертификат по
-TLS-ALPN-01):
+HTTPS отдаёт Caddy, который уже стоит на хосте (он же обслуживает Apella.ru) —
+второй экземпляр не нужен. Добавьте в его Caddyfile:
 
-```bash
-docker compose --profile caddy up -d
-docker compose logs -f caddy
+```caddyfile
+import /etc/caddy/akiyama.caddyfile      # файл из deploy/caddy/
 ```
 
-Конфиг — `deploy/caddy/Caddyfile`, сертификаты — `data/caddy/`.
+и перезагрузите без простоя:
+
+```bash
+docker exec <caddy-контейнер> caddy reload --config /etc/caddy/Caddyfile
+```
+
+Если Caddy в bridge-сети, `reverse_proxy` должен смотреть на `akiyama-bot:8080`,
+а не на `127.0.0.1:8080` — детали в [docs/https.md](docs/https.md),
+раздел «Свой Caddy (Apella.ru)».
 
 ## Тесты
 

@@ -107,10 +107,11 @@ curl -s http://127.0.0.1:8080/api/health     # {"ok":true,"service":"akiyama-sit
 Значит проброс работает хотя бы для 80, а 443 принимает кто-то другой
 (скорее всего сам роутер или правило на другой порт). Отсюда порядок действий:
 
-1. **Caddy в контейнере** — занимает только 443, sudo не нужен, см.
-   «Caddy без sudo» ниже. Затем **проброс 443 на роутере** → IP хоста.
+1. **Добавить сайт в свой Caddy от Apella.ru** — он уже на этом хосте и
+   правится без sudo, см. раздел «Свой Caddy (Apella.ru)». Затем
+   **проброс 443 на роутере** → IP хоста.
 2. **Cloudflare Tunnel** (вариант A) — если 443 пробросить не получается.
-3. **Caddy службой + sudo** (вариант B) — если доступ к root'у есть.
+3. **Caddy службой + sudo** (вариант B) — если своего контейнера нет.
 
 Что проверить руками (всё работает без sudo):
 
@@ -121,10 +122,11 @@ docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' | grep -i caddy
 ls -l /etc/caddy/Caddyfile                             # читается? править всё равно нужен root
 ```
 
-- 443 свободен → поднимайте Caddy в контейнере (следующий раздел);
+- 443 свободен → сейчас его никто не слушает; блок в Caddy начнёт слушать;
 - 443 занят другим сервисом → освободите или пробросьте 443 на другой порт;
-- на 80 отвечает Caddy, запущенный **контейнером** → это ваш контейнер,
-  его Caddyfile правится без sudo, можно добавить блок прямо туда.
+- на 80 отвечает Caddy, запущенный **контейнером** → это ваш Caddy (Apella),
+  его Caddyfile правится без sudo: добавляйте блок туда, отдельный сервер
+  не нужен.
 
 Проверить, что сайт-источник жив, можно независимо от всего этого:
 
@@ -195,74 +197,121 @@ Caddy для этого домена больше не нужен: его бло
 docker compose --profile tunnel up -d --build
 ```
 
-## Caddy без sudo (рекомендуется, если Caddy на хосте правится только root'ом)
+## Свой Caddy (Apella.ru) — добавить сайт в него
 
-Ситуация: Caddy стоит службой (`systemctl`), его конфиг лежит в `/etc/caddy/`,
-и без sudo туда не попасть. Docker при этом доступен обычному пользователю
-(бот уже запущен через `docker compose`). Тогда **свой** Caddy поднимаем
-контейнером — sudo не нужен ни на одном шаге.
+Если Caddy, который обслуживает `apella.ru`, ваш и запущен контейнером (правится
+без sudo) — второй Caddy не нужен. Добавляем блок для `akiyama-5rp.ru` в тот же
+Caddy: он уже держит 80/443, у него уже есть ACME-аккаунт, оба домена
+обслуживаются одним процессом на одних портах.
 
-Устройство: контейнер `caddy` в `network_mode: host` занимает **только 443**,
-порт 80 остаётся системному Caddy (он и отдаёт `308` на https), бот остаётся
-на `127.0.0.1:8080`. Сертификат берётся по **TLS-ALPN-01** — проверка идёт на
-443, поэтому занятый 80 не мешает.
+### 1. Найти, где лежит конфиг вашего Caddy
 
 ```bash
-# 1. код + сборка (бот уже собран, тут только новая версия)
-git pull
-docker compose up -d --build
+docker ps --format '{{.Names}}\t{{.Image}}' | grep -i caddy
+# NAME  IMAGE
+# apella-caddy  caddy:2.8
 
-# 2. поднять Caddy-терминатор
-docker compose --profile caddy up -d
-docker compose logs -f caddy
+docker inspect apella-caddy -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+# /home/user/apella/Caddyfile -> /etc/caddy/Caddyfile
+# /home/user/apella/caddy_data -> /data
+
+docker inspect apella-caddy -f 'network={{.HostConfig.NetworkMode}} ports={{.HostConfig.PortBindings}}'
+# network=host   → reverse_proxy 127.0.0.1:8080
+# network=bridge → нужна общая сеть с ботом, см. шаг 3
 ```
 
-В логе должно появиться:
+### 2. Добавить блок
+
+Положите `deploy/caddy/akiyama.caddyfile` из репозитория рядом с Caddyfile
+Apella и добавьте в конец Caddyfile одну строку:
+
+```caddyfile
+import /etc/caddy/akiyama.caddyfile
+```
+
+Либо просто скопируйте содержимое блока `akiyama-5rp.ru { … }` в Caddyfile
+рядом с блоком Apella. Порт 80/443 у Caddyfile один на все домены — ничего
+не конфликтует.
+
+### 3. Прописать, куда проксировать (зависит от сети)
+
+| Как запущен Caddy | `reverse_proxy` |
+|---|---|
+| `network_mode: host` | `127.0.0.1:8080` — бот опубликован как `127.0.0.1:8080` на хосте |
+| bridge-сеть compose | `akiyama-bot:8080` — бот должен быть в **той же** сети |
+| Caddy службой на хосте | `127.0.0.1:8080` |
+
+Для bridge-сети: добавьте бота в сеть Apella (имя сети смотрите в
+`docker network ls`, обычно `<папка-проекта>_default`):
+
+```yaml
+# docker-compose.yml бота
+services:
+  bot:
+    networks: [apella]
+
+networks:
+  apella:
+    external: true
+    name: apella_default     # ← из docker network ls
+```
+
+`ports: 127.0.0.1:8080:8080` можно оставить — для локальных проверок.
+
+### 4. Применить без простоя и без sudo
+
+```bash
+# проверка синтаксиса, затем hot-reload (старые соединения не рвутся)
+docker exec apella-caddy caddy validate --config /etc/caddy/Caddyfile
+docker exec apella-caddy caddy reload  --config /etc/caddy/Caddyfile
+
+# либо, если reload недоступен:
+docker compose -f ~/apella/docker-compose.yml restart caddy
+```
+
+В логе:
+
+```bash
+docker logs -f apella-caddy
+```
 
 ```
 "msg":"certificate obtained successfully","identifier":"akiyama-5rp.ru"
-"msg":"serving initial configuration"
 ```
 
 Проверка:
 
 ```bash
-curl -I https://akiyama-5rp.ru/api/health    # HTTP/2 200
+curl -I https://akiyama-5rp.ru/api/health      # HTTP/2 200
+docker exec apella-caddy wget -qO- http://127.0.0.1:8080/api/health
 ```
 
-Проверка одной строкой, что именно этот контейнер слушает 443 (без sudo):
+### Что будет с 443
 
-```bash
-ss -lnt | grep ':443'        # должен появиться LISTEN
-docker compose ps caddy      # STATUS = Up
+Сейчас на хосте 443 никто не слушает (`ss -lnt | grep :443` пусто), а снаружи
+соединение принимает роутер и молча закрывает. Когда Caddy получит блок для
+`akiyama-5rp.ru`, он начнёт слушать 443 — **после этого нужен проброс TCP 443
+на роутере** (см. следующий раздел). Порт 80 уже проброшен: снаружи
+`http://akiyama-5rp.ru` отдаёт `308`, значит HTTP-01 пройдёт без проблем.
+
+Если Caddy в контейнере не публикует 443 — добавьте в его сервис:
+
+```yaml
+ports:
+  - "80:80"
+  - "443:443"
 ```
 
-Файлы: конфиг — `deploy/caddy/Caddyfile`, сертификаты — `data/caddy/data`
-(это том, переживает пересоздание контейнера).
+### Если порт 443 на роутере недоступен
 
-### Что важно знать
+Тогда вместо проброса можно спрятать сайт за Cloudflare (DNS домена уже там):
+оранжевое облако у `akiyama-5rp.ru`, режим SSL/TLS **Full (strict)** или
+**Flexible**, origin — тот же Caddy. Сертификат для origin можно взять
+Cloudflare Origin CA (бесплатно, 15 лет) и подключить его в Caddy через
+`tls /etc/caddy/origin.pem /etc/caddy/origin.key`. Это отдельный путь,
+нужен только если 443 наружу не открывается.
 
-- **Порт 80 не занимаем.** В конфиге стоит `auto_https disable_redirects` и
-  `disable_http_challenge`: Caddy не пытается сесть на 80 и не воюет с
-  системным Caddy. Редирект `http → https` уже отдаёт тот, кто слушает 80.
-- **443 должен быть свободен.** Проверить: `ss -lnt | grep ':443'`. Если там
-  уже кто-то есть (например, роутер отдаёт свою админку) — освободите или
-  пробросьте 443 на другой порт хоста и поменяйте публикацию.
-- **Обновления**: `docker compose --profile caddy up -d --build` — профиль
-  указывать обязательно, иначе контейнер Caddy не пересоздастся.
-- **Стоп**: `docker compose --profile caddy down` (бот продолжит работать).
-- Системный Caddy не трогаем: если позже появится sudo — можно перенести блок
-  из `deploy/caddy/Caddyfile` в `/etc/caddy/Caddyfile` и удалить профиль.
-
-### Если ACME в логе падает
-
-| Строка в `docker compose logs caddy` | Причина | Что делать |
-|---|---|---|
-| `connection refused`, `timeout`, `no route to host` | входящий 443 не доходит до хоста | проброс TCP 443 на роутере → IP хоста; см. ниже |
-| `unauthorized`, `invalid response` | по 443 ответил не наш Caddy (роутер/чужой сервис) | освободить 443 или пробросить на другой порт |
-| `too many failed authorizations` | упёрлись в лимит LE после серии неудач | подождать час или временно тестировать на staging |
-
-## Caddy без sudo: проброс 443 на роутере
+## Проброс 443 на роутере
 
 Это не про sudo, а про админку роутера (192.168.0.1 / 192.168.1.1 — адрес
 шлюза вашей сети, логин/пароль обычно на наклейке). Нужно:
@@ -361,6 +410,8 @@ Encrypt, а на домашний бот он ходит по WireGuard/frp. Т�
 ## Чек-лист «готово»
 
 - [ ] `curl -I https://akiyama-5rp.ru/api/health` → `HTTP/2 200`
+- [ ] `docker exec <caddy> caddy reload` прошёл без ошибок, в логе
+      `certificate obtained successfully` для `akiyama-5rp.ru`
 - [ ] В браузере зелёный замок, сертификат выдан Let's Encrypt (вариант B) или
       Google Trust Services / Cloudflare (вариант A)
 - [ ] `https://akiyama-5rp.ru/staff` открывается, вход через Discord работает

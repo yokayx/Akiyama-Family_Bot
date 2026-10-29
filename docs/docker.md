@@ -40,10 +40,10 @@ sudo chown -R 1000:1000 data
 туннель Cloudflare:
 
 ```bash
-# Caddy в контейнере: занимает только 443, sudo не нужен
-docker compose --profile caddy up -d
+# обычно: блок для сайта добавляется в уже работающий Caddy (Apella.ru)
+#   docker exec <caddy> caddy reload --config /etc/caddy/Caddyfile
 
-# либо вариант без белого IP и проброса портов (CLOUDFLARE_TUNNEL_TOKEN в .env)
+# вариант без белого IP и проброса портов (CLOUDFLARE_TUNNEL_TOKEN в .env)
 docker compose --profile tunnel up -d
 ```
 

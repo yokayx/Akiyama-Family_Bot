@@ -136,7 +136,7 @@ if have ss || have netstat; then
         bad "порт 443 НИКТО НЕ СЛУШАЕТ — это и есть «сайт отправил недействительный ответ»"
         info "TCP кто-то принимает (роутер), но TLS-рукопожатие некому вести:"
         info "сервер молча закрывает соединение, браузер получает 0 байт."
-        tip "Без sudo: Caddy в контейнере — docker compose --profile caddy up -d (docs/https.md, «Caddy без sudo»)."
+        tip "Без sudo: добавьте блок из deploy/caddy/akiyama.caddyfile в свой Caddy (Apella.ru) и caddy reload."
         tip "С sudo: блок из Caddyfile в системный конфиг Caddy и sudo systemctl reload caddy (вариант B)."
         tip "Или не занимайте 443 вообще: Cloudflare Tunnel (docs/https.md, вариант A)."
         if ! is_root; then
@@ -227,12 +227,45 @@ else
     warn "systemctl нет — службы не проверить"
 fi
 
+# Caddy, запущенный контейнером (например, от Apella.ru) — правится без sudo.
 if have docker; then
-    CADDY_CT="$(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null | grep -i caddy)"
-    if [ -n "$CADDY_CT" ]; then
-        ok "Caddy запущен контейнером:"
-        printf '%s\n' "$CADDY_CT" | sed 's/^/       /'
-        info "контейнер, скорее всего, ваш — правится без sudo (Caddyfile + перезапуск)"
+    CADDY_NAMES="$(docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | awk 'tolower($0) ~ /caddy/ {print $1}')"
+    if [ -n "$CADDY_NAMES" ]; then
+        for ct in $CADDY_NAMES; do
+            ok "Caddy найден в Docker: $ct"
+            NETMODE="$(docker inspect "$ct" -f '{{.HostConfig.NetworkMode}}' 2>/dev/null)"
+            PUB="$(docker inspect "$ct" -f '{{json .HostConfig.PortBindings}}' 2>/dev/null)"
+            info "сеть: ${NETMODE:-?}   публикация: ${PUB:-?}"
+            info "конфиг (монтируется с хоста):"
+            docker inspect "$ct" -f '{{range .Mounts}}       {{.Source}} → {{.Destination}}{{"\n"}}{{end}}' 2>/dev/null \
+                | grep -v 'caddy_data\|caddy_config\|/data\|/config' || true
+
+            CFG_IN_CT="$(docker inspect "$ct" \
+                -f '{{range .Mounts}}{{if eq .Destination "/etc/caddy/Caddyfile"}}{{.Source}}{{end}}{{end}}' \
+                2>/dev/null)"
+            if [ -n "$CFG_IN_CT" ]; then
+                info "Caddyfile на хосте: $CFG_IN_CT"
+                if [ -r "$CFG_IN_CT" ]; then
+                    if grep -q "$DOMAIN" "$CFG_IN_CT" 2>/dev/null; then
+                        ok "в нём есть блок для $DOMAIN"
+                    else
+                        bad "в Caddyfile НЕТ блока для $DOMAIN"
+                        tip "Добавьте в $CFG_IN_CT строку: import deploy/caddy/akiyama.caddyfile (или скопируйте блок akiyama-5rp.ru { ... })"
+                        tip "Затем: docker exec $ct caddy reload --config /etc/caddy/Caddyfile"
+                    fi
+                    if grep -q 'import' "$CFG_IN_CT" 2>/dev/null; then
+                        info "файл использует import — проверьте, что путь к akiyama.caddyfile виден из контейнера"
+                    fi
+                    if [ "$NETMODE" = "bridge" ] || [ "$NETMODE" = "default" ]; then
+                        tip "Caddy в bridge-сети: reverse_proxy должен смотреть на akiyama-bot:8080, а не 127.0.0.1:8080"
+                        tip "Добавьте боту сеть Caddy: networks: [<сеть apella>] (docker network ls)"
+                    fi
+                else
+                    warn "Caddyfile ($CFG_IN_CT) не читается без root — правьте его из папки проекта или через docker exec"
+                    tip "Посмотреть содержимое без sudo: docker exec $ct cat /etc/caddy/Caddyfile"
+                fi
+            fi
+        done
     fi
 fi
 
@@ -317,7 +350,8 @@ if [ ${#TIPS[@]} -eq 0 ]; then
 else
     printf 'Что делать:\n'
     printf '%s\n' "${TIPS[@]}" | awk '!seen[$0]++' | sed 's/^/  • /'
-    printf '\nЕсли 443 не слушает и sudo недоступен: docker compose --profile caddy up -d\n'
+    printf '\nЕсли 443 не слушает: добавьте блок akiyama-5rp.ru в свой Caddy (Apella.ru),\n'
+    printf 'затем docker exec <caddy> caddy reload --config /etc/caddy/Caddyfile\n'
     printf 'Если 443 слушает, но снаружи тишина: проброс TCP 443 на роутере → IP хоста\n'
     printf 'Полный разбор вариантов — docs/https.md\n'
 fi

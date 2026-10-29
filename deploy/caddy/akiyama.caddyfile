@@ -1,0 +1,44 @@
+# Сайт akiyama-5rp.ru — блок для ВАШЕГО Caddy (тот, что обслуживает Apella.ru).
+#
+# Не отдельный сервер и не второй Caddy: этот блок добавляется в существующий
+# Caddyfile рядом с блоком apella.ru, после чего Caddy начнёт обслуживать
+# оба домена на тех же 80/443.
+#
+# Как подключить (вариант «import», чтобы не копировать каждый раз):
+#   в вашем Caddyfile, после global-блока {} и рядом с Apella:
+#       import /etc/caddy/akiyama.caddyfile
+#
+# Если Caddyfile смонтирован в контейнер из папки проекта, положите этот файл
+# рядом с ним и укажите путь внутри контейнера.
+#
+# ВАЖНО, upstream (reverse_proxy) зависит от сети вашего Caddy:
+#   • Caddy в network_mode: host  → reverse_proxy 127.0.0.1:8080   (как ниже)
+#   • Caddy в bridge-сети compose → бот должен быть в ТОЙ ЖЕ сети,
+#     тогда reverse_proxy akiyama-bot:8080 (см. docs/https.md)
+# Проверка одной командой: docker inspect <caddy> -f '{{.HostConfig.NetworkMode}}'
+
+akiyama-5rp.ru {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        X-Frame-Options DENY
+    }
+
+    # Файлы Vite с хэшем в имени — кэшируем надолго.
+    @static path_regexp static \.(css|js|png|jpe?g|svg|woff2?|ico|webp)$
+    header @static Cache-Control "public, max-age=2592000, immutable"
+
+    # index.html, клиентские маршруты (/staff, /vzp) и JSON API — без кэша,
+    # иначе после выкладки браузер держит старый бандл.
+    @dynamic not path_regexp \.(css|js|png|jpe?g|svg|woff2?|ico|webp)$
+    header @dynamic Cache-Control "no-cache"
+
+    reverse_proxy 127.0.0.1:8080
+}
+
+# www — только когда появится DNS-запись (CNAME на akiyama-5rp.ru).
+# www.akiyama-5rp.ru {
+#     redir https://akiyama-5rp.ru{uri} permanent
+# }
