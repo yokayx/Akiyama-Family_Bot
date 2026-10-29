@@ -2,14 +2,15 @@
 # Диагностика доступности сайта (обычно akiyama-5rp.ru).
 #
 # Только читает и ничего не меняет: не правит DNS, не перезапускает Caddy,
-# не трогает контейнеры. Запускать на самом сервере с сайтом.
+# не трогает контейнеры. Запускать на самом сервере с сайтом, лучше с sudo —
+# иначе не видно, какой процесс держит порт:
 #
-#   bash tools/diagnose_site.sh                # домен по умолчанию
-#   bash tools/diagnose_site.sh akiyama-5rp.ru
+#   sudo bash tools/diagnose_site.sh
+#   sudo bash tools/diagnose_site.sh akiyama-5rp.ru
 #
 # Зачем: при ошибке браузера «Сайт отправил недействительный ответ»
 # (ERR_SSL_PROTOCOL_ERROR) нужно понять, где обрывается цепочка
-# «DNS → проброс портов → Caddy → бот:8080». Подробности — docs/https.md.
+# «DNS → проброс портов → TLS-терминатор → бот:8080». Разбор — docs/https.md.
 
 set -uo pipefail
 
@@ -28,6 +29,7 @@ warn()    { printf '%s[WARN]%s %s\n'   "$C_WARN" "$C_OFF" "$1"; }
 bad()     { printf '%s[FAIL]%s %s\n'   "$C_BAD"  "$C_OFF" "$1"; }
 info()    { printf '       %s\n' "$1"; }
 have()    { command -v "$1" >/dev/null 2>&1; }
+is_root() { [ "$(id -u)" -eq 0 ]; }
 
 TIPS=()
 tip() { TIPS+=("$1"); }
@@ -37,8 +39,9 @@ http_code() { # http_code URL [доп. аргументы curl]
     curl -s -o /dev/null -w '%{http_code}' --max-time 6 "$@" "$url" 2>/dev/null
 }
 
-printf 'Домен: %s   локальный порт сайта: %s   хост: %s\n' \
-    "$DOMAIN" "$LOCAL_PORT" "$(hostname 2>/dev/null || echo '?')"
+printf 'Домен: %s   локальный порт сайта: %s   хост: %s   права: %s\n' \
+    "$DOMAIN" "$LOCAL_PORT" "$(hostname 2>/dev/null || echo '?')" \
+    "$(is_root && echo root || echo "uid $(id -u) (процессы портов не видны)")"
 
 # --- 1. DNS -------------------------------------------------------------------
 section "1. DNS"
@@ -66,8 +69,8 @@ if have dig; then
     [ -n "$AAAA" ] && info "AAAA: $AAAA (если IPv6 у сервера не настроен — уберите запись)"
     WWW="$(dig +short A "www.$DOMAIN" 2>/dev/null | xargs)"
     if [ -z "$WWW" ]; then
-        warn "у www.$DOMAIN нет A-записи — не указывайте это имя в Caddyfile"
-        tip "Либо создайте CNAME www → $DOMAIN, либо уберите www из адресов сайта в Caddy."
+        info "www.$DOMAIN без A-записи — нормально, если это имя нигде не рекламируется"
+        tip "Не указывайте www.$DOMAIN в Caddyfile без DNS-записи: Caddy будет вечно пытаться выпустить на него сертификат."
     fi
 fi
 
@@ -102,69 +105,146 @@ else
 fi
 
 # --- 3. Кто слушает порты ------------------------------------------------------
-section "3. Локальные слушатели"
-if have ss; then
-    LISTENERS="$(ss -lntp 2>/dev/null | grep -E ':((80|443|8080))\b' || true)"
-elif have netstat; then
-    LISTENERS="$(netstat -lntp 2>/dev/null | grep -E ':((80|443|8080))\b' || true)"
+section "3. Локальные слушатели 80 / 443"
+if have ss || have netstat; then
+    show_ports() {
+        if have ss; then ss -lntp 2>/dev/null; else netstat -lntp 2>/dev/null; fi \
+            | grep -E ':(80|443)\b' | sed 's/^/       /'
+    }
+    LISTENERS="$(show_ports)"
+    [ -n "$LISTENERS" ] && printf '%s\n' "$LISTENERS"
+
+    if have ss; then
+        P80="$(ss -lnt 2>/dev/null | grep -cE ':80\b.*LISTEN')"
+        P443="$(ss -lnt 2>/dev/null | grep -cE ':443\b.*LISTEN')"
+    else
+        P80="$(netstat -lnt 2>/dev/null | grep -cE ':80\b')"
+        P443="$(netstat -lnt 2>/dev/null | grep -cE ':443\b')"
+    fi
+
+    if [ "${P80:-0}" -gt 0 ]; then
+        ok "порт 80 слушает"
+    else
+        bad "порт 80 никто не слушает — HTTP тоже не работает, ACME по HTTP-01 невозможен"
+        tip "Поднимите TLS-терминатор (Caddy) или уходите на Cloudflare Tunnel — docs/https.md."
+    fi
+
+    if [ "${P443:-0}" -gt 0 ]; then
+        ok "порт 443 слушает"
+    else
+        bad "порт 443 НИКТО НЕ СЛУШАЕТ — это и есть «сайт отправил недействительный ответ»"
+        info "TCP кто-то принимает (роутер), но TLS-рукопожатие некому вести:"
+        info "сервер молча закрывает соединение, браузер получает 0 байт."
+        tip "Поднимите HTTPS-сервер на 443: Caddy с блоком для $DOMAIN (docs/https.md, вариант B)."
+        tip "Или не занимайте 443 вообще: Cloudflare Tunnel (docs/https.md, вариант A) — 10 минут, без проброса портов."
+        if ! is_root; then
+            tip "Запустите скрипт через sudo: без root не видно, какой процесс держит порты."
+        fi
+    fi
 else
-    LISTENERS=""
     warn "нет ss/netstat — пропускаю"
-fi
-if [ -n "$LISTENERS" ]; then
-    printf '%s\n' "$LISTENERS" | sed 's/^/       /'
-else
-    bad "на 80/443/8080 ничего не слушает"
-    tip "Caddy не запущен (systemctl status caddy) или контейнер бота упал (docker compose ps)."
 fi
 
 # --- 4. Бот внутренне ---------------------------------------------------------
 section "4. Бот (FastAPI) на 127.0.0.1:$LOCAL_PORT"
+BODY="$(curl -s --max-time 6 "http://127.0.0.1:$LOCAL_PORT/api/health" 2>/dev/null)"
 CODE="$(http_code "http://127.0.0.1:$LOCAL_PORT/api/health")"
-if [ "$CODE" = "200" ]; then
-    ok "/api/health → 200"
-    info "$(curl -s --max-time 6 "http://127.0.0.1:$LOCAL_PORT/api/health" 2>/dev/null | head -c 200)"
+if printf '%s' "$BODY" | grep -q '"ok"'; then
+    ok "/api/health → 200, JSON: $(printf '%s' "$BODY" | head -c 120)"
 else
-    CODE_ALT="$(http_code "http://127.0.0.1:$LOCAL_PORT/api/online")"
-    if [ "$CODE_ALT" = "200" ]; then
-        ok "/api/online → 200 (эндпоинта /api/health ещё нет в этой версии)"
+    ONLINE="$(curl -s --max-time 6 "http://127.0.0.1:$LOCAL_PORT/api/online" 2>/dev/null | head -c 160)"
+    if printf '%s' "$ONLINE" | grep -q '{'; then
+        ok "/api/online отдаёт JSON — бот жив"
+        warn "но /api/health вернул HTML/код $CODE — в контейнере старая сборка без этого эндпоинта"
+        tip "Пересоберите: git pull && docker compose up -d --build"
+    elif [ "$CODE" = "200" ]; then
+        bad "порт $LOCAL_PORT отвечает, но отдаёт HTML вместо JSON API"
+        info "похоже, SPA-фолбэк перехватывает /api/* — контейнер старой сборки"
+        tip "Пересоберите: git pull && docker compose up -d --build"
     else
-        bad "сайт внутри контейнера не отвечает (health=$CODE, online=$CODE_ALT)"
+        bad "сайт внутри контейнера не отвечает (код $CODE)"
         tip "docker compose ps / docker compose logs --tail=80 bot — процесс бота жив?"
     fi
 fi
 
-# --- 5. Caddy на localhost -----------------------------------------------------
-section "5. Caddy как TLS-терминатор"
-if have curl; then
-    CODE_TLS="$(http_code "https://$DOMAIN/" --resolve "$DOMAIN:443:127.0.0.1" -k)"
-    if [ "$CODE_TLS" = "200" ]; then
-        ok "Caddy локально отдаёт HTTPS (200)"
-    elif [ "$CODE_TLS" = "000" ]; then
-        bad "локально по https://127.0.0.1:443 c SNI $DOMAIN никто не отвечает"
-        tip "Caddy не запущен или не слушает 443: systemctl status caddy; ss -lntp | grep :443"
-    else
-        warn "Caddy ответил кодом $CODE_TLS (ожидался 200)"
-    fi
-fi
+# --- 5. Кто отвечает на :80 и куда ведёт редирект --------------------------------
+section "5. Что отдаёт HTTP на порту 80"
+HEADERS="$(curl -sI --max-time 6 "http://$DOMAIN/" 2>/dev/null | tr -d '\r')"
+H_CODE="$(printf '%s' "$HEADERS" | awk 'NR==1{print $2}')"
+H_LOC="$(printf '%s' "$HEADERS" | awk 'tolower($1)=="location:"{print $2}' | head -1)"
+H_SRV="$(printf '%s' "$HEADERS" | awk 'tolower($1)=="server:"{print $2}' | head -1)"
 
-if have openssl; then
-    CERT="$(echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -servername "$DOMAIN" 2>/dev/null \
-        | openssl x509 -noout -subject -issuer -dates 2>/dev/null)"
-    if [ -n "$CERT" ]; then
-        printf '%s\n' "$CERT" | sed 's/^/       /'
-        if echo "$CERT" | grep -qi "issuer.*\(Let's Encrypt\|R11\|R10\|E5\|E6\|Cloudflare\|Google Trust\)"; then
-            ok "сертификат публичного УЦ выдан"
+[ -n "$H_CODE" ] && info "HTTP-код: $H_CODE"
+[ -n "$H_SRV" ]  && info "Server: $H_SRV"
+[ -n "$H_LOC" ]  && info "Location: $H_LOC"
+
+case "$H_CODE" in
+    000|"")
+        bad "на http://$DOMAIN никто не отвечает"
+        tip "Порт 80 не доходит до сервера или слушатель :80 не настроен на этот Host."
+        ;;
+    30[1278])
+        if printf '%s' "$H_LOC" | grep -q '^https://'; then
+            warn "HTTP редиректит на HTTPS ($H_LOC), а на 443 никто не слушает → браузер видит обрыв"
+            tip "Это и есть весь симптом: сначала поднимаем HTTPS на 443, редирект остаётся как есть."
         else
-            warn "сертификат не от публичного УЦ (самоподписанный/внутренний CA) — браузер ругнётся"
+            info "редирект на $H_LOC — проверьте, что это ожидаемое поведение"
         fi
-    else
-        bad "сертификат не предъявляется — это и есть «сайт отправил недействительный ответ»"
-    fi
+        ;;
+    200) ok "HTTP отвечает 200 — сайт доступен хотя бы по http" ;;
+    *)   info "код $H_CODE" ;;
+esac
+
+if [ -z "$H_SRV" ] && [ -n "$H_CODE" ]; then
+    info "заголовка Server нет — часто признак Cloudflare Tunnel или Caddy"
 fi
 
-# --- 6. Хранилище сертификатов и лог ACME --------------------------------------
-section "6. Сертификаты Caddy и попытки ACME"
+# --- 6. Что за сервер 80/443: службы и бинарники --------------------------------
+section "6. Службы, которые могут держать TLS"
+if have systemctl; then
+    for svc in caddy nginx apache2 httpd traefik haproxy; do
+        STATE="$(systemctl is-active "$svc" 2>/dev/null)"
+        case "$STATE" in
+            active)
+                ok "$svc: active"
+                if [ "$svc" = "caddy" ] && have journalctl; then
+                    ERR="$(journalctl -u caddy --no-pager -n 120 2>/dev/null \
+                        | grep -iE 'listen|bind|permission|acme|challenge|certificate' | tail -n 6)"
+                    [ -n "$ERR" ] && printf '%s\n' "$ERR" | sed 's/^/       /'
+                fi
+                ;;
+            inactive|failed)
+                info "$svc: $STATE"
+                [ "$svc" = "caddy" ] && tip "Запустите и проверьте: sudo systemctl start caddy && sudo journalctl -u caddy -n 50 --no-pager"
+                ;;
+            *)
+                ;;
+        esac
+    done
+else
+    warn "systemctl нет — службы не проверить"
+fi
+
+if have caddy; then
+    info "caddy: $(caddy version 2>/dev/null | head -1)"
+    for cfg in /etc/caddy/Caddyfile "$HOME/Caddyfile" ./Caddyfile; do
+        [ -f "$cfg" ] || continue
+        info "конфиг: $cfg"
+        if grep -q "$DOMAIN" "$cfg" 2>/dev/null; then
+            ok "в конфиге есть $DOMAIN"
+        else
+            bad "в $cfg НЕТ блока для $DOMAIN → Caddy не будет слушать 443 за этот домен"
+            tip "Добавьте блок из Caddyfile репозитория и: sudo systemctl reload caddy"
+        fi
+        TEST="$(caddy validate --config "$cfg" --adapter caddyfile 2>&1 | tail -n 3)"
+        [ -n "$TEST" ] && printf '%s\n' "$TEST" | sed 's/^/       /'
+    done
+else
+    info "бинарника caddy в PATH нет — возможно, не установлен"
+fi
+
+# --- 7. Хранилище сертификатов и лог ACME --------------------------------------
+section "7. Сертификаты и попытки ACME"
 STORAGE_FOUND=""
 for path in \
     /var/lib/caddy/.local/share/caddy \
@@ -184,40 +264,40 @@ if [ -n "$STORAGE_FOUND" ]; then
     fi
 else
     info "папка сертификатов не найдена (нет прав или Caddy не используется)"
+    ! is_root && info "запустите с sudo, чтобы увидеть /var/lib/caddy"
 fi
 
-if have journalctl; then
+if have journalctl && have systemctl && systemctl is-active --quiet caddy 2>/dev/null; then
     LOG="$(journalctl -u caddy --no-pager -n 200 2>/dev/null \
-        | grep -iE 'acme|challenge|certificate|obtain|error' | tail -n 12)"
+        | grep -iE 'acme|challenge|certificate|obtain|error' | tail -n 10)"
     if [ -n "$LOG" ]; then
-        info "последние строки про сертификаты:"
         printf '%s\n' "$LOG" | sed 's/^/       /'
-        if echo "$LOG" | grep -qiE 'challenge failed|connection refused|timeout|unauthorized'; then
+        if echo "$LOG" | grep -qiE 'challenge failed|connection refused|unauthorized'; then
             bad "ACME-проверка не проходит → снаружи до Caddy не доходят 80/443"
             tip "Проверьте проброс 80/443 на роутере и файрвол хоста; либо DNS-01 / Cloudflare Tunnel."
         fi
-    else
-        info "в логе caddy нет строк про ACME (или лог недоступен без sudo)"
     fi
 fi
 
-# --- 7. Docker -----------------------------------------------------------------
-section "7. Контейнеры"
+# --- 8. Docker -----------------------------------------------------------------
+section "8. Контейнеры"
 if have docker; then
     docker compose ps 2>/dev/null | sed 's/^/       /' || warn "docker compose ps не выполнился"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qi cloudflared; then
+        ok "туннель cloudflared запущен"
+    fi
 else
     warn "docker не найден — бот запущен иначе?"
 fi
 
-# --- 8. Что видно снаружи -------------------------------------------------------
-section "8. Проверка снаружи (со стороны сервера)"
+# --- 9. Что видно снаружи -------------------------------------------------------
+section "9. Проверка снаружи (со стороны сервера)"
 CODE_HTTP="$(http_code "http://$DOMAIN/")"
-OUT_TLS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "https://$DOMAIN/" 2>/dev/null)"
-info "http://$DOMAIN            → $CODE_HTTP"
-info "https://$DOMAIN           → $OUT_TLS"
-info "000 — ответа нет, 200 — сайт ответил."
-info "С домашнего роутера запрос может не выходить наружу и не возвращаться"
-info "(hairpin NAT), поэтому надёжнее проверить с телефона по мобильному интернету."
+CODE_TLS="$(http_code "https://$DOMAIN/")"
+info "http://$DOMAIN   → $CODE_HTTP"
+info "https://$DOMAIN  → $CODE_TLS"
+info "000 — ответа нет; с домашнего роутера запрос может не выходить наружу"
+info "и не возвращаться (hairpin NAT), надёжнее проверить с телефона по мобильному интернету."
 
 # --- Итог ----------------------------------------------------------------------
 section "Итог"
