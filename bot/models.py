@@ -1,0 +1,126 @@
+from datetime import UTC, datetime
+
+from sqlalchemy import Boolean, DateTime, Integer, Text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class RosterState(Base):
+    __tablename__ = "roster_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fail_state: Mapped[bool] = mapped_column(Boolean, default=False)
+    message_ids: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class PostedVzpWar(Base):
+    __tablename__ = "posted_vzp_wars"
+
+    war_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class ApplicationQuestion(Base):
+    __tablename__ = "application_questions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order: Mapped[int] = mapped_column(Integer, default=1)
+    question: Mapped[str] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    kind: Mapped[str] = mapped_column(Text, default="main")
+
+
+class ApplicationKind(Base):
+    """Статус набора по виду заявки: Main (фракции) и VZP."""
+
+    __tablename__ = "application_kinds"
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    is_open: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class BotMessage(Base):
+    """Служебные сообщения бота, которые надо уметь обновлять."""
+
+    __tablename__ = "bot_messages"
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    channel_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class Ticket(Base):
+    __tablename__ = "tickets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    channel_id: Mapped[int] = mapped_column(Integer, unique=True)
+    applicant_id: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(Text, default="main")
+    handler_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(Text, default="open")
+    answers_json: Mapped[str] = mapped_column(Text, default="[]")
+    applicant_replied: Mapped[bool] = mapped_column(Boolean, default=False)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Birthday(Base):
+    __tablename__ = "birthdays"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[int] = mapped_column(Integer)
+    month: Mapped[int] = mapped_column(Integer)
+
+
+class VzpDefense(Base):
+    """Забив на нас: чтобы не слать уведомление об одном бое дважды."""
+
+    __tablename__ = "vzp_defenses"
+    war_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    attacker: Mapped[str] = mapped_column(Text, default="")
+    territory: Mapped[str] = mapped_column(Text, default="")
+    noticed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class VzpWarDetail(Base):
+    """Полный JSON войны, который бот получил при публикации.
+
+    Для страницы сайта: итоги, счёт, состав участников, статистика.
+    """
+
+    __tablename__ = "vzp_war_details"
+    war_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    posted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class PlusEvent(Base):
+    __tablename__ = "plus_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    channel_id: Mapped[int] = mapped_column(Integer)
+    message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    creator_id: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    need_static: Mapped[bool] = mapped_column(Boolean, default=False)
+    participants_json: Mapped[str] = mapped_column(Text, default="{}")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    event_kind: Mapped[str] = mapped_column(Text, default="general")
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MemberStat(Base):
+    """Сколько раз участник заходил на сервер и выходил (для логов)."""
+
+    __tablename__ = "member_stats"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    joins_count: Mapped[int] = mapped_column(Integer, default=0)
+    leaves_count: Mapped[int] = mapped_column(Integer, default=0)

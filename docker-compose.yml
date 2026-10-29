@@ -1,0 +1,22 @@
+services:
+  bot:
+    build: .
+    image: akiyama-family-bot:latest
+    container_name: akiyama-bot
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:///data/akiyama.db
+    volumes:
+      - ./data:/app/data
+    # Сайт akiyama-5rp.ru (FastAPI) — Caddy проксирует с этого порта.
+    ports:
+      - "127.0.0.1:8080:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,26 @@
+# akiyama-5rp.ru — сайт семьи Akiyama (бот в Docker, порт 8080)
+#
+# ВАЖНО: ваш Caddy уже слушает http://:80 для другого приложения
+# (SPA /srv + /api/* → backend:8030). Не трогайте его. Добавьте только этот
+# блок — Caddy роутинг по Host: для akiyama-5rp.ru отдаст этот сайт,
+# для других Host — прежний.
+#
+# Предварительное условие: A-запись akiyama-5rp.ru → IP этого хоста.
+# TLS подхватится автоматически через Let's Encrypt.
+
+akiyama-5rp.ru, www.akiyama-5rp.ru {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        X-Frame-Options DENY
+    }
+
+    @static {
+        path_regexp static \.(css|js|png|jpe?g|svg|woff2?|ico|webp)$
+    }
+    header @static Cache-Control "public, max-age=2592000, immutable"
+
+    reverse_proxy / 127.0.0.1:8080
+}

@@ -1,0 +1,1 @@
+"""Akiyama family Discord bot."""
