@@ -99,6 +99,17 @@ caddy reload    # или systemctl reload caddy
 `www.akiyama-5rp.ru` в конфиге — только если для него есть DNS-запись
 (сейчас её нет: Caddy будет вечно пытаться выпустить на это имя сертификат).
 
+Если `/etc/caddy` требует sudo, а Docker доступен — Caddy поднимается
+контейнером и занимает только 443 (порт 80 остаётся системному Caddy):
+
+```bash
+docker compose --profile caddy up -d
+docker compose logs -f caddy        # "certificate obtained successfully"
+```
+
+Конфиг: `deploy/caddy/Caddyfile`. Нужен проброс TCP 443 на роутере → IP хоста.
+Подробно — [https.md](https.md), раздел «Caddy без sudo».
+
 Если провайдер режет входящий 80 — Caddy не получит сертификат по HTTP-01;
 нужен DNS-01 через Cloudflare API или туннель, см. docs/https.md.
 

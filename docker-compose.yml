@@ -1,4 +1,29 @@
 services:
+  # --- HTTPS-терминатор без sudo: Caddy в контейнере (docs/https.md) -----------
+  #
+  # Нужен, если Caddy на хосте ставится/правится только через sudo, а Docker
+  # доступен обычному пользователю. Занимает ТОЛЬКО 443 (порт 80 остаётся
+  # системному Caddy), сертификат берёт по TLS-ALPN-01.
+  #   docker compose --profile caddy up -d
+  #   docker compose logs -f caddy
+  caddy:
+    image: caddy:2
+    container_name: akiyama-caddy
+    restart: unless-stopped
+    profiles: ["caddy"]
+    # host: Caddy слушает 443 хоста напрямую и ходит на 127.0.0.1:8080,
+    # где опубликован бот. Docker-сеть тут не нужна.
+    network_mode: host
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   bot:
     build: .
     image: akiyama-family-bot:latest

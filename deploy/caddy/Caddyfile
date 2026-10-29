@@ -1,0 +1,56 @@
+# Caddy в контейнере — вариант «без sudo» (docs/https.md, «Caddy без sudo»)
+#
+# Зачем отдельный контейнер: системный Caddy (тот, что слушает :80 для другого
+# приложения) правится только через sudo, а Docker у вас доступен без него.
+# Этот конфиг занимает ТОЛЬКО 443 и не трогает порт 80:
+#   • HTTP-01 отключён — 80 уже занят, а Let's Encrypt умеет проверять и по
+#     TLS-ALPN-01 на 443;
+#   • auto_https disable_redirects — Caddy не пытается сесть на :80 ради
+#     редиректа http→https (его уже делает системный Caddy: он отдаёт 308).
+#
+# Условие работы: входящий TCP 443 с интернета доходит до этого хоста
+# (проброс 443 на роутере → IP хоста). Проверка — docs/https.md.
+
+{
+    email admin@akiyama-5rp.ru
+    auto_https disable_redirects
+}
+
+akiyama-5rp.ru {
+    tls {
+        issuer acme {
+            # Порт 80 недоступен этому контейнеру — проверяем только TLS-ALPN-01.
+            disable_http_challenge
+        }
+    }
+
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        X-Frame-Options DENY
+    }
+
+    # Файлы Vite с хэшем в имени кэшируются надолго.
+    @static path_regexp static \.(css|js|png|jpe?g|svg|woff2?|ico|webp)$
+    header @static Cache-Control "public, max-age=2592000, immutable"
+
+    # index.html, клиентские маршруты и JSON API — без кэша.
+    @dynamic not path_regexp \.(css|js|png|jpe?g|svg|woff2?|ico|webp)$
+    header @dynamic Cache-Control "no-cache"
+
+    # network_mode: host → 127.0.0.1 здесь это loopback самого хоста,
+    # где бот опубликован как 127.0.0.1:8080.
+    reverse_proxy 127.0.0.1:8080
+}
+
+# www — только когда появится DNS-запись (CNAME на akiyama-5rp.ru).
+# www.akiyama-5rp.ru {
+#     tls {
+#         issuer acme {
+#             disable_http_challenge
+#         }
+#     }
+#     redir https://akiyama-5rp.ru{uri} permanent
+# }

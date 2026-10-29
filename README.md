@@ -52,9 +52,20 @@ docker compose logs -f bot
 Tunnel (белый IP и порты не нужны).
 
 - Браузер пишет **«Сайт отправил недействительный ответ»** →
-  [docs/https.md](docs/https.md): разбор, почему так, и три варианта починки.
-- Быстрая диагностика на сервере: `bash tools/diagnose_site.sh`.
+  [docs/https.md](docs/https.md): разбор, почему так, и варианты починки.
+- Быстрая диагностика на сервере: `bash tools/diagnose_site.sh` (sudo не нужен).
 - Проверка живости сайта: `curl -I https://akiyama-5rp.ru/api/health`.
+
+Если Caddy на хосте правится только через sudo, а Docker доступен — HTTPS
+поднимает **Caddy в контейнере** на 443 (порт 80 не трогает, сертификат по
+TLS-ALPN-01):
+
+```bash
+docker compose --profile caddy up -d
+docker compose logs -f caddy
+```
+
+Конфиг — `deploy/caddy/Caddyfile`, сертификаты — `data/caddy/`.
 
 ## Тесты
 

@@ -2,8 +2,9 @@
 # Диагностика доступности сайта (обычно akiyama-5rp.ru).
 #
 # Только читает и ничего не меняет: не правит DNS, не перезапускает Caddy,
-# не трогает контейнеры. Запускать на самом сервере с сайтом, лучше с sudo —
-# иначе не видно, какой процесс держит порт:
+# не трогает контейнеры. Запускать на самом сервере с сайтом; sudo не обязателен —
+# без него скрипт всё равно видит, занят ли порт, кто отвечает на 80 и что в
+# Docker (просто не покажет имя процесса-владельца порта):
 #
 #   sudo bash tools/diagnose_site.sh
 #   sudo bash tools/diagnose_site.sh akiyama-5rp.ru
@@ -135,10 +136,11 @@ if have ss || have netstat; then
         bad "порт 443 НИКТО НЕ СЛУШАЕТ — это и есть «сайт отправил недействительный ответ»"
         info "TCP кто-то принимает (роутер), но TLS-рукопожатие некому вести:"
         info "сервер молча закрывает соединение, браузер получает 0 байт."
-        tip "Поднимите HTTPS-сервер на 443: Caddy с блоком для $DOMAIN (docs/https.md, вариант B)."
-        tip "Или не занимайте 443 вообще: Cloudflare Tunnel (docs/https.md, вариант A) — 10 минут, без проброса портов."
+        tip "Без sudo: Caddy в контейнере — docker compose --profile caddy up -d (docs/https.md, «Caddy без sudo»)."
+        tip "С sudo: блок из Caddyfile в системный конфиг Caddy и sudo systemctl reload caddy (вариант B)."
+        tip "Или не занимайте 443 вообще: Cloudflare Tunnel (docs/https.md, вариант A)."
         if ! is_root; then
-            tip "Запустите скрипт через sudo: без root не видно, какой процесс держит порты."
+            info "без root не видно, какой процесс держит порт, — на вердикт это не влияет"
         fi
     fi
 else
@@ -225,6 +227,15 @@ else
     warn "systemctl нет — службы не проверить"
 fi
 
+if have docker; then
+    CADDY_CT="$(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null | grep -i caddy)"
+    if [ -n "$CADDY_CT" ]; then
+        ok "Caddy запущен контейнером:"
+        printf '%s\n' "$CADDY_CT" | sed 's/^/       /'
+        info "контейнер, скорее всего, ваш — правится без sudo (Caddyfile + перезапуск)"
+    fi
+fi
+
 if have caddy; then
     info "caddy: $(caddy version 2>/dev/null | head -1)"
     for cfg in /etc/caddy/Caddyfile "$HOME/Caddyfile" ./Caddyfile; do
@@ -306,5 +317,7 @@ if [ ${#TIPS[@]} -eq 0 ]; then
 else
     printf 'Что делать:\n'
     printf '%s\n' "${TIPS[@]}" | awk '!seen[$0]++' | sed 's/^/  • /'
-    printf '\nПолный разбор вариантов — docs/https.md\n'
+    printf '\nЕсли 443 не слушает и sudo недоступен: docker compose --profile caddy up -d\n'
+    printf 'Если 443 слушает, но снаружи тишина: проброс TCP 443 на роутере → IP хоста\n'
+    printf 'Полный разбор вариантов — docs/https.md\n'
 fi
